@@ -1,0 +1,3025 @@
+<!doctype html>
+<html lang="es">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Music Genre Tree — Classics</title>
+        <style>
+            @import url("https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Instrument+Serif:ital@0;1&display=swap");
+
+            *,
+            *::before,
+            *::after {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }
+
+            :root {
+                --bg: #0a0a0b;
+                --bg2: #111114;
+                --bg3: #1a1a1f;
+                --border: rgba(255, 255, 255, 0.08);
+                --border-active: rgba(255, 255, 255, 0.3);
+                --accent: #c8a96e;
+                --accent2: #7eb8c8;
+                --text: #e8e4dc;
+                --text2: #8a8680;
+                --text3: #5a5650;
+                --node-w: 280px;
+                --node-h: auto;
+            }
+
+            html,
+            body {
+                width: 100%;
+                height: 100%;
+                background: var(--bg);
+                color: var(--text);
+                font-family: "Space Mono", monospace;
+                overflow: hidden;
+                cursor: default;
+            }
+
+            /* ── canvas layer ── */
+            #canvas-layer {
+                position: fixed;
+                inset: 0;
+                pointer-events: none;
+            }
+
+            /* ── graph container ── */
+            #graph {
+                position: fixed;
+                inset: 0;
+                transform-origin: 0 0;
+                will-change: transform;
+            }
+
+            /* ── node ── */
+            .node {
+                position: absolute;
+                width: 280px;
+                background: var(--bg2);
+                border: 1px solid var(--border);
+                border-radius: 2px;
+                cursor: pointer;
+                transition:
+                    border-color 0.2s,
+                    box-shadow 0.2s,
+                    transform 0.15s;
+                user-select: none;
+            }
+            .node:hover {
+                border-color: var(--border-active);
+                z-index: 10;
+                transform: translateY(-2px);
+            }
+            .node.active {
+                border-color: var(--accent);
+                box-shadow:
+                    0 0 0 1px var(--accent),
+                    0 8px 40px rgba(200, 169, 110, 0.2);
+                z-index: 20;
+            }
+            .node.dimmed {
+                opacity: 0.22;
+                pointer-events: none;
+            }
+
+            .node-header {
+                padding: 10px 12px 8px;
+                border-bottom: 1px solid var(--border);
+                display: flex;
+                align-items: flex-start;
+                gap: 8px;
+            }
+            .node-num {
+                font-size: 9px;
+                color: var(--text3);
+                letter-spacing: 0.08em;
+                padding-top: 2px;
+                flex-shrink: 0;
+            }
+            .node-genre {
+                font-size: 11px;
+                font-weight: 700;
+                color: var(--accent);
+                letter-spacing: 0.06em;
+                text-transform: uppercase;
+                line-height: 1.3;
+            }
+            .node-region {
+                font-size: 9px;
+                color: var(--text3);
+                letter-spacing: 0.05em;
+                margin-top: 1px;
+            }
+
+            .node-body {
+                padding: 8px 12px 10px;
+            }
+            .node-title {
+                font-family: "Instrument Serif", serif;
+                font-style: italic;
+                font-size: 13px;
+                color: var(--text);
+                line-height: 1.4;
+                margin-bottom: 4px;
+            }
+            .node-artist {
+                font-size: 9px;
+                color: var(--text2);
+                letter-spacing: 0.04em;
+            }
+            .node-year {
+                font-size: 9px;
+                color: var(--text3);
+                letter-spacing: 0.04em;
+                margin-top: 1px;
+            }
+
+            /* ── relation pills ── */
+            .node-relations {
+                padding: 0 12px 10px;
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px;
+            }
+            .rel-pill {
+                font-size: 9px;
+                letter-spacing: 0.05em;
+                padding: 2px 7px;
+                border: 1px solid var(--border);
+                border-radius: 20px;
+                color: var(--text2);
+                cursor: pointer;
+                transition:
+                    border-color 0.15s,
+                    color 0.15s,
+                    background 0.15s;
+                white-space: nowrap;
+            }
+            .rel-pill:hover {
+                border-color: var(--accent2);
+                color: var(--accent2);
+                background: rgba(126, 184, 200, 0.06);
+            }
+            .rel-pill.outgoing {
+                border-color: rgba(200, 169, 110, 0.3);
+                color: var(--accent);
+            }
+            .rel-pill.incoming {
+                border-color: rgba(126, 184, 200, 0.3);
+                color: var(--accent2);
+            }
+
+            /* ── SVG arrows ── */
+            #canvas-layer line,
+            #canvas-layer path {
+                stroke-width: 1;
+                pointer-events: none;
+            }
+
+            /* ── UI chrome ── */
+            #ui {
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                z-index: 100;
+                pointer-events: none;
+            }
+
+            #topbar {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 14px 20px;
+                pointer-events: all;
+            }
+            #title-block h1 {
+                font-family: "Instrument Serif", serif;
+                font-size: 18px;
+                font-weight: 400;
+                font-style: italic;
+                color: var(--text);
+                letter-spacing: 0.02em;
+            }
+            #title-block p {
+                font-size: 9px;
+                color: var(--text3);
+                letter-spacing: 0.1em;
+                text-transform: uppercase;
+                margin-top: 2px;
+            }
+
+            #search-wrap {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }
+            #search {
+                background: var(--bg3);
+                border: 1px solid var(--border);
+                border-radius: 2px;
+                padding: 7px 12px;
+                color: var(--text);
+                font-family: "Space Mono", monospace;
+                font-size: 11px;
+                width: 220px;
+                outline: none;
+                transition: border-color 0.2s;
+            }
+            #search::placeholder {
+                color: var(--text3);
+            }
+            #search:focus {
+                border-color: var(--border-active);
+            }
+
+            #count {
+                font-size: 10px;
+                color: var(--text3);
+                letter-spacing: 0.06em;
+                white-space: nowrap;
+            }
+
+            #hint {
+                position: fixed;
+                bottom: 18px;
+                left: 50%;
+                transform: translateX(-50%);
+                font-size: 9px;
+                color: var(--text3);
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+                pointer-events: none;
+                z-index: 100;
+            }
+
+            #zoom-btns {
+                position: fixed;
+                bottom: 18px;
+                right: 20px;
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                z-index: 100;
+            }
+            .z-btn {
+                width: 28px;
+                height: 28px;
+                background: var(--bg3);
+                border: 1px solid var(--border);
+                border-radius: 2px;
+                color: var(--text2);
+                font-size: 14px;
+                font-family: "Space Mono", monospace;
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                transition:
+                    border-color 0.15s,
+                    color 0.15s;
+            }
+            .z-btn:hover {
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+
+            #reset-btn {
+                position: fixed;
+                bottom: 18px;
+                left: 20px;
+                background: var(--bg3);
+                border: 1px solid var(--border);
+                border-radius: 2px;
+                color: var(--text2);
+                font-size: 9px;
+                font-family: "Space Mono", monospace;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+                padding: 6px 12px;
+                cursor: pointer;
+                z-index: 100;
+                transition:
+                    border-color 0.15s,
+                    color 0.15s;
+            }
+            #reset-btn:hover {
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+
+            /* grid bg */
+            body::before {
+                content: "";
+                position: fixed;
+                inset: 0;
+                background-image:
+                    linear-gradient(
+                        rgba(255, 255, 255, 0.015) 1px,
+                        transparent 1px
+                    ),
+                    linear-gradient(
+                        90deg,
+                        rgba(255, 255, 255, 0.015) 1px,
+                        transparent 1px
+                    );
+                background-size: 40px 40px;
+                pointer-events: none;
+                z-index: 0;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="ui">
+            <div id="topbar">
+                <div id="title-block">
+                    <h1>Music Genre Tree</h1>
+                    <p>Classics — 1109 álbumes · mapa conceptual</p>
+                </div>
+                <div id="search-wrap">
+                    <input
+                        id="search"
+                        type="text"
+                        placeholder="Buscar género…"
+                        autocomplete="off"
+                    />
+                    <span id="count"></span>
+                </div>
+            </div>
+        </div>
+
+        <svg id="canvas-layer" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <marker
+                    id="arr-gold"
+                    markerWidth="6"
+                    markerHeight="6"
+                    refX="5"
+                    refY="3"
+                    orient="auto"
+                >
+                    <path d="M0,0 L0,6 L6,3 z" fill="rgba(200,169,110,0.6)" />
+                </marker>
+                <marker
+                    id="arr-blue"
+                    markerWidth="6"
+                    markerHeight="6"
+                    refX="5"
+                    refY="3"
+                    orient="auto"
+                >
+                    <path d="M0,0 L0,6 L6,3 z" fill="rgba(126,184,200,0.5)" />
+                </marker>
+                <marker
+                    id="arr-dim"
+                    markerWidth="6"
+                    markerHeight="6"
+                    refX="5"
+                    refY="3"
+                    orient="auto"
+                >
+                    <path d="M0,0 L0,6 L6,3 z" fill="rgba(255,255,255,0.06)" />
+                </marker>
+            </defs>
+        </svg>
+
+        <div id="graph"></div>
+
+        <div id="hint">
+            Arrastra para mover · Rueda para zoom · Clic en nodo para explorar
+        </div>
+
+        <div id="zoom-btns">
+            <button class="z-btn" id="zin">+</button>
+            <button class="z-btn" id="zout">−</button>
+        </div>
+        <button id="reset-btn">↺ Reset vista</button>
+
+        <script>
+            // ═══════════════════════════════════════════════════
+            // DATA  — géneros con álbum representativo y relaciones
+            // ═══════════════════════════════════════════════════
+            const GENRES = [
+                // ── PREHISTORIC / ANCIENT ──
+                {
+                    id: "prehistoric",
+                    num: "1110",
+                    genre: "Prehistoric",
+                    region: "Ancient",
+                    artist: "Fornnordiska klanger",
+                    title: "The Sounds of Prehistoric Scandinavia",
+                    year: "2.5M–5000 BC",
+                    rel_out: ["ancient_sumerian"],
+                },
+                {
+                    id: "ancient_sumerian",
+                    num: "1100",
+                    genre: "Ancient Sumerian / Egyptian / Greek",
+                    region: "Ancient",
+                    artist: "Ensemble De Organographia",
+                    title: "Music of the Ancient Sumerians, Egyptians & Greeks",
+                    year: "1950 BC–400 AD",
+                    rel_out: [
+                        "ancient_greek",
+                        "ancient_roman",
+                        "vedic",
+                        "byzantine_chant",
+                    ],
+                },
+                {
+                    id: "ancient_greek",
+                    num: "1101",
+                    genre: "Ancient Greek",
+                    region: "Ancient",
+                    artist: "Gregorio Paniagua",
+                    title: "Musique de la Grèce antique",
+                    year: "800 BC–600 AD",
+                    rel_out: ["byzantine_chant", "rembetika"],
+                },
+                {
+                    id: "ancient_roman",
+                    num: "1102",
+                    genre: "Ancient Roman",
+                    region: "Ancient",
+                    artist: "Musica Romana",
+                    title: "Symphonia Panica",
+                    year: "750 BC–450 AD",
+                    rel_out: ["gregorian"],
+                },
+                {
+                    id: "ancient_japanese",
+                    num: "1103",
+                    genre: "Ancient Japanese",
+                    region: "Ancient East Asia",
+                    artist: "Toshiyuki Tsuchitori",
+                    title: "Ancient Japanese Bronze Bells — Yayoi Period",
+                    year: "400 BC–25 AD",
+                    rel_out: ["gagaku"],
+                },
+                {
+                    id: "ancient_korean",
+                    num: "1104",
+                    genre: "Ancient Korean",
+                    region: "Ancient East Asia",
+                    artist: "Son Han-byeol",
+                    title: "Ancient Korean Songs",
+                    year: "2018",
+                    rel_out: ["aak"],
+                },
+                {
+                    id: "ancient_levitical",
+                    num: "1105",
+                    genre: "Ancient Levitical",
+                    region: "Ancient",
+                    artist: "Suzanne Haïk Vantoura",
+                    title: "La Musique De La Bible Révélée",
+                    year: "900–500 BC",
+                    rel_out: ["syriac_chant", "chazzanut"],
+                },
+                {
+                    id: "syriac_chant",
+                    num: "1106",
+                    genre: "Syriac Chant",
+                    region: "Religious",
+                    artist: "Various",
+                    title: "Syrian Orthodox Church — Antioch Liturgy",
+                    year: "2014",
+                    rel_out: ["byzantine_chant"],
+                },
+                {
+                    id: "byzantine_chant",
+                    num: "1107",
+                    genre: "Byzantine Chant",
+                    region: "Religious",
+                    artist: "Marcel Pérès",
+                    title: "Chants de l'Eglise de Rome Période Byzantine",
+                    year: "600–800",
+                    rel_out: ["gregorian", "entechna"],
+                },
+                {
+                    id: "vedic",
+                    num: "1108",
+                    genre: "Vedic Music",
+                    region: "Religious",
+                    artist: "Various",
+                    title: "The Four Vedas — Oral Traditions",
+                    year: "1500–1000 BC",
+                    rel_out: ["hindustani", "carnatic", "dhrupad"],
+                },
+                {
+                    id: "taoist",
+                    num: "1109",
+                    genre: "Taoist Music",
+                    region: "Religious",
+                    artist: "Various",
+                    title: "Chinese Taoist Music",
+                    year: "1969",
+                    rel_out: ["guoyue", "peking_opera"],
+                },
+
+                // ── SOUTH AFRICA ──
+                {
+                    id: "khoisan",
+                    num: "0000",
+                    genre: "Khoisan Folk",
+                    region: "Southern Africa",
+                    artist: "Various",
+                    title: "The Music of !Kung Bushmen of the Kalahari",
+                    year: "1962",
+                    rel_out: ["sotho_tswana", "nguni"],
+                },
+                {
+                    id: "sotho_tswana",
+                    num: "0001",
+                    genre: "Sotho-Tswana Folk",
+                    region: "Southern Africa",
+                    artist: "Various",
+                    title: "Tswana and Sotho Voices",
+                    year: "2000",
+                    rel_out: ["mbube"],
+                },
+                {
+                    id: "nguni",
+                    num: "0002",
+                    genre: "Nguni Folk",
+                    region: "Southern Africa",
+                    artist: "Princess Constance Magogo kaDinuzulu",
+                    title: "The Zulu Songs",
+                    year: "1972",
+                    rel_out: ["mbube", "township_jive"],
+                },
+                {
+                    id: "shona_mbira",
+                    num: "0004",
+                    genre: "Shona Mbira",
+                    region: "Southern Africa",
+                    artist: "Dumisani Maraire",
+                    title: "The African Mbira",
+                    year: "1971",
+                    rel_out: ["chimurenga"],
+                },
+                {
+                    id: "mbube",
+                    num: "0005",
+                    genre: "Mbube",
+                    region: "Southern Africa",
+                    artist: "Various",
+                    title: "Mbube Roots — Zulu Choral Music",
+                    year: "1987",
+                    rel_out: ["township_jive"],
+                },
+                {
+                    id: "chimurenga",
+                    num: "0008",
+                    genre: "Chimurenga",
+                    region: "Southern Africa",
+                    artist: "Thomas Mapfumo",
+                    title: "The Chimurenga Singles",
+                    year: "1976–1980",
+                    rel_out: ["jit"],
+                },
+                {
+                    id: "jit",
+                    num: "0007",
+                    genre: "Jit",
+                    region: "Southern Africa",
+                    artist: "Hallelujah Chicken Run Band",
+                    title: "Take One",
+                    year: "1974–1979",
+                    rel_out: [],
+                },
+                {
+                    id: "township_jive",
+                    num: "0009",
+                    genre: "Township Jive",
+                    region: "Southern Africa",
+                    artist: "Various",
+                    title: "The Kings and Queens of Township Jive",
+                    year: "1991",
+                    rel_out: ["kapuka"],
+                },
+
+                // ── CENTRAL AFRICA ──
+                {
+                    id: "pygmy",
+                    num: "0010",
+                    genre: "Mbenga-Mbuti Folk",
+                    region: "Central Africa",
+                    artist: "Various",
+                    title: "The Pygmies of the Ituri Forest",
+                    year: "1958",
+                    rel_out: ["central_african"],
+                },
+                {
+                    id: "central_african",
+                    num: "0011",
+                    genre: "Central African Folk",
+                    region: "Central Africa",
+                    artist: "Various",
+                    title: "Music of Equatorial Africa",
+                    year: "1950",
+                    rel_out: ["soukous", "semba"],
+                },
+                {
+                    id: "semba",
+                    num: "0014",
+                    genre: "Semba",
+                    region: "Central Africa",
+                    artist: "Various",
+                    title: "Angola 60's",
+                    year: "1956–1970",
+                    rel_out: ["kizomba", "kuduro"],
+                },
+                {
+                    id: "bikutsi",
+                    num: "0015",
+                    genre: "Bikutsi",
+                    region: "Central Africa",
+                    artist: "Francis Bebey",
+                    title: "African Electronic Music",
+                    year: "1975–1982",
+                    rel_out: ["makossa"],
+                },
+                {
+                    id: "makossa",
+                    num: "0016",
+                    genre: "Makossa",
+                    region: "Central Africa",
+                    artist: "Various",
+                    title: "Pop Makossa — The Invasive Dance Beat of Cameroon",
+                    year: "1976–1984",
+                    rel_out: ["soukous"],
+                },
+                {
+                    id: "soukous",
+                    num: "0017",
+                    genre: "Soukous",
+                    region: "Central Africa",
+                    artist: "Various",
+                    title: "The Rough Guide to Congolese Soukous",
+                    year: "2000",
+                    rel_out: ["kizomba"],
+                },
+                {
+                    id: "kizomba",
+                    num: "0018",
+                    genre: "Kizomba",
+                    region: "Central Africa",
+                    artist: "Various",
+                    title: "Angola 90s",
+                    year: "1999",
+                    rel_out: ["kuduro"],
+                },
+                {
+                    id: "kuduro",
+                    num: "0019",
+                    genre: "Kuduro",
+                    region: "Central Africa",
+                    artist: "Frédéric Galliano",
+                    title: "Kuduro Sound System",
+                    year: "2006",
+                    rel_out: [],
+                },
+
+                // ── WEST AFRICA ──
+                {
+                    id: "griot",
+                    num: "0033",
+                    genre: "Griot",
+                    region: "West Africa",
+                    artist: "Toumani Diabaté & Ballaké Sissoko",
+                    title: "New Ancient Strings",
+                    year: "1999",
+                    rel_out: ["mbalax", "palm_wine", "mande"],
+                },
+                {
+                    id: "mande",
+                    num: "0023",
+                    genre: "Mande Folk",
+                    region: "West Africa",
+                    artist: "Various",
+                    title: "Musique Malinké",
+                    year: "1972",
+                    rel_out: ["griot", "balani"],
+                },
+                {
+                    id: "wolof",
+                    num: "0021",
+                    genre: "Wolof Folk",
+                    region: "West Africa",
+                    artist: "Various",
+                    title: "Wolof Music of Senegal and the Gambia",
+                    year: "1955",
+                    rel_out: ["mbalax"],
+                },
+                {
+                    id: "palm_wine",
+                    num: "0035",
+                    genre: "Palm Wine",
+                    region: "West Africa",
+                    artist: "S.E. Rogie",
+                    title: "Palm Wine Guitar Music",
+                    year: "1960–1969",
+                    rel_out: ["juju", "highlife"],
+                },
+                {
+                    id: "juju",
+                    num: "0036",
+                    genre: "Jùjú",
+                    region: "West Africa",
+                    artist: "Various",
+                    title: "Juju Roots",
+                    year: "1930–1959",
+                    rel_out: ["fuji", "afrobeat"],
+                },
+                {
+                    id: "highlife",
+                    num: "0037",
+                    genre: "Highlife",
+                    region: "West Africa",
+                    artist: "E.T. Mensah",
+                    title: "Day by Day — Classic Highlife",
+                    year: "1950–1969",
+                    rel_out: ["afrobeat", "makossa"],
+                },
+                {
+                    id: "afrobeat",
+                    num: "0038",
+                    genre: "Afrobeat",
+                    region: "West Africa",
+                    artist: "Fela Ransome Kuti & Africa 70",
+                    title: "Expensive Shit",
+                    year: "1975",
+                    rel_out: ["zouglou"],
+                },
+                {
+                    id: "fuji",
+                    num: "0041",
+                    genre: "Fuji",
+                    region: "West Africa",
+                    artist: "Barrister",
+                    title: "Iwa",
+                    year: "1982",
+                    rel_out: [],
+                },
+                {
+                    id: "mbalax",
+                    num: "0042",
+                    genre: "Mbalax",
+                    region: "West Africa",
+                    artist: "Youssou N'Dour",
+                    title: "Immigrés",
+                    year: "1984",
+                    rel_out: [],
+                },
+                {
+                    id: "zouglou",
+                    num: "0043",
+                    genre: "Zouglou",
+                    region: "West Africa",
+                    artist: "Magic System",
+                    title: "1er Gaou",
+                    year: "2000",
+                    rel_out: [],
+                },
+                {
+                    id: "balani",
+                    num: "0044",
+                    genre: "Balani Show",
+                    region: "West Africa",
+                    artist: "Various",
+                    title: "Balani Show Super Hits",
+                    year: "2014",
+                    rel_out: [],
+                },
+                {
+                    id: "gumbe",
+                    num: "0040",
+                    genre: "Gumbe",
+                    region: "West Africa",
+                    artist: "Super Mama Djombo",
+                    title: "Na Cambanã",
+                    year: "1980",
+                    rel_out: ["mbalax"],
+                },
+
+                // ── EAST AFRICA ──
+                {
+                    id: "muziki_dansi",
+                    num: "0050",
+                    genre: "Muziki wa Dansi",
+                    region: "East Africa",
+                    artist: "Mbaraka Mwinshehe",
+                    title: "Zanzibara 9 — Tanzania",
+                    year: "1972–74",
+                    rel_out: ["benga", "kapuka"],
+                },
+                {
+                    id: "benga",
+                    num: "0051",
+                    genre: "Benga",
+                    region: "East Africa",
+                    artist: "Daniel Owino Misiani",
+                    title: "The King of History",
+                    year: "2010",
+                    rel_out: ["kapuka"],
+                },
+                {
+                    id: "kapuka",
+                    num: "0053",
+                    genre: "Kapuka",
+                    region: "East Africa",
+                    artist: "Ogopa 1",
+                    title: "Kenyan Club Classics",
+                    year: "2002",
+                    rel_out: ["singeli"],
+                },
+                {
+                    id: "singeli",
+                    num: "0054",
+                    genre: "Singeli",
+                    region: "East Africa",
+                    artist: "Various",
+                    title: "Sounds of Sisso",
+                    year: "2017",
+                    rel_out: [],
+                },
+                {
+                    id: "marrabenta",
+                    num: "0052",
+                    genre: "Marrabenta",
+                    region: "East Africa",
+                    artist: "Various",
+                    title: "Forgotten Guitars From Mozambique",
+                    year: "1955–1957",
+                    rel_out: ["benga"],
+                },
+                {
+                    id: "timbila",
+                    num: "0049",
+                    genre: "Timbila",
+                    region: "East Africa",
+                    artist: "Venancio Mbande Orchestra",
+                    title: "Timbila Ta Venancio",
+                    year: "2001",
+                    rel_out: ["marrabenta"],
+                },
+
+                // ── HORN / NORTH EAST AFRICA ──
+                {
+                    id: "azmari",
+                    num: "0062",
+                    genre: "Azmari",
+                    region: "Horn of Africa",
+                    artist: "Various",
+                    title: "Éthiopiques 2 — Urban Azmaris",
+                    year: "1998",
+                    rel_out: ["tizita"],
+                },
+                {
+                    id: "tizita",
+                    num: "0063",
+                    genre: "Tizita",
+                    region: "Horn of Africa",
+                    artist: "Various",
+                    title: "Éthiopiques 10 — Ethiopian Blues & Ballads",
+                    year: "2002",
+                    rel_out: [],
+                },
+                {
+                    id: "qaraami",
+                    num: "0064",
+                    genre: "Qaraami",
+                    region: "Horn of Africa",
+                    artist: "Various",
+                    title: "Sweet as Broken Dates — Lost Somali Tapes",
+                    year: "2017",
+                    rel_out: [],
+                },
+
+                // ── NORTH AFRICA ──
+                {
+                    id: "gnawa",
+                    num: "0067",
+                    genre: "Gnawa Folk",
+                    region: "North Africa",
+                    artist: "Various",
+                    title: "Gnawa Music of Marrakesh — Night Spirit Masters",
+                    year: "1990",
+                    rel_out: ["proto_rai"],
+                },
+                {
+                    id: "amazigh",
+                    num: "0065",
+                    genre: "Amazigh Folk",
+                    region: "North Africa",
+                    artist: "Various",
+                    title: "Music of Morocco",
+                    year: "1972",
+                    rel_out: ["gnawa", "tishoumaren"],
+                },
+                {
+                    id: "tuareg",
+                    num: "0066",
+                    genre: "Tuareg Folk",
+                    region: "North Africa",
+                    artist: "Various",
+                    title: "Tuareg Music of the Southern Sahara",
+                    year: "1960",
+                    rel_out: ["tishoumaren"],
+                },
+                {
+                    id: "tishoumaren",
+                    num: "0069",
+                    genre: "Tishoumaren",
+                    region: "North Africa",
+                    artist: "Tinariwen",
+                    title: "Amassakoul",
+                    year: "2004",
+                    rel_out: [],
+                },
+                {
+                    id: "moorish",
+                    num: "0068",
+                    genre: "Moorish Folk",
+                    region: "North Africa",
+                    artist: "Khalifa Ould Eide & Dimi Mint Abba",
+                    title: "Moorish Music From Mauritania",
+                    year: "1990",
+                    rel_out: ["gnawa"],
+                },
+                {
+                    id: "proto_rai",
+                    num: "0077",
+                    genre: "Proto-Raï",
+                    region: "North Africa",
+                    artist: "Various",
+                    title: "1970s Algerian Proto-Raï Underground",
+                    year: "2008",
+                    rel_out: ["shaabi"],
+                },
+                {
+                    id: "shaabi",
+                    num: "0078",
+                    genre: "Shaabi",
+                    region: "North Africa / Middle East",
+                    artist: "Ahmed Adaweyah",
+                    title: "Adaweya 77",
+                    year: "1977",
+                    rel_out: ["mahraganat"],
+                },
+                {
+                    id: "mahraganat",
+                    num: "0079",
+                    genre: "Mahraganat",
+                    region: "Middle East",
+                    artist: "EEK",
+                    title: "Kahraba",
+                    year: "2015",
+                    rel_out: [],
+                },
+
+                // ── MIDDLE EAST ──
+                {
+                    id: "arabic_classical",
+                    num: "0105",
+                    genre: "Arabic Classical",
+                    region: "Middle East",
+                    artist: "Various",
+                    title: "Classical Music of Cairo, Egypt",
+                    year: "1998",
+                    rel_out: ["arabic_pop", "baladi"],
+                },
+                {
+                    id: "arabic_pop",
+                    num: "0075",
+                    genre: "Traditional Arabic Pop",
+                    region: "Middle East",
+                    artist: "Simon Shaheen",
+                    title: "The Music of Mohamed Abdel Wahab",
+                    year: "1990",
+                    rel_out: ["shaabi", "arabesque"],
+                },
+                {
+                    id: "baladi",
+                    num: "0072",
+                    genre: "Baladi",
+                    region: "Middle East",
+                    artist: "Hossam Ramzy",
+                    title: "Baladi Plus",
+                    year: "1995",
+                    rel_out: ["arabic_bellydance"],
+                },
+                {
+                    id: "arabic_bellydance",
+                    num: "0074",
+                    genre: "Arabic Bellydance",
+                    region: "Middle East",
+                    artist: "Mohammed El-Bakkar",
+                    title: "Port Said — Music of the Middle East",
+                    year: "1957",
+                    rel_out: [],
+                },
+                {
+                    id: "dabke",
+                    num: "0073",
+                    genre: "Dabke",
+                    region: "Middle East",
+                    artist: "Naif Agby",
+                    title: "El Debke — Music of the Middle-East",
+                    year: "1962",
+                    rel_out: [],
+                },
+                {
+                    id: "persian_classical",
+                    num: "0106",
+                    genre: "Persian Classical",
+                    region: "Middle East",
+                    artist: "Various",
+                    title: "Classical Music of Iran",
+                    year: "1966",
+                    rel_out: ["arabic_classical", "sufiana"],
+                },
+                {
+                    id: "turkish_classical",
+                    num: "0107",
+                    genre: "Turkish Classical",
+                    region: "Middle East",
+                    artist: "Dede Efendi",
+                    title: "The Golden Horn",
+                    year: "2002",
+                    rel_out: ["arabesque", "ottoman_military"],
+                },
+                {
+                    id: "ottoman_military",
+                    num: "0088",
+                    genre: "Ottoman Military",
+                    region: "Central Asia",
+                    artist: "Various",
+                    title: "Turkish Military Band Music",
+                    year: "1991",
+                    rel_out: [],
+                },
+                {
+                    id: "arabesque",
+                    num: "0089",
+                    genre: "Arabesque",
+                    region: "Middle East",
+                    artist: "Orhan Gencebay",
+                    title: "Batsın Bu Dünya",
+                    year: "1975",
+                    rel_out: [],
+                },
+                {
+                    id: "shashmaqam",
+                    num: "0108",
+                    genre: "Shashmaqam",
+                    region: "Central Asia",
+                    artist: "The Academy of Maqâm",
+                    title: "Invisible Face of the Beloved",
+                    year: "2006",
+                    rel_out: ["persian_classical"],
+                },
+                {
+                    id: "mevlevi",
+                    num: "0104",
+                    genre: "Mevlevi Sufi",
+                    region: "Religious",
+                    artist: "Oruç Güvenç",
+                    title: "Ocean of Remembrance",
+                    year: "1995",
+                    rel_out: ["shashmaqam"],
+                },
+
+                // ── SEPHARDIC / KLEZMER ──
+                {
+                    id: "sephardic",
+                    num: "0091",
+                    genre: "Sephardic Folk",
+                    region: "Jewish",
+                    artist: "Gloria Levy",
+                    title: "Sephardic Folk Songs",
+                    year: "1958",
+                    rel_out: ["klezmer"],
+                },
+                {
+                    id: "ashkenazi",
+                    num: "0092",
+                    genre: "Ashkenazi Folk",
+                    region: "Jewish",
+                    artist: "Raasche",
+                    title: "Jewish Folk Songs of Europe",
+                    year: "1960",
+                    rel_out: ["klezmer"],
+                },
+                {
+                    id: "klezmer",
+                    num: "0093",
+                    genre: "Klezmer",
+                    region: "Jewish",
+                    artist: "Various",
+                    title: "Klezmer Music — Early Yiddish Instrumental Music",
+                    year: "1908–1927",
+                    rel_out: [],
+                },
+                {
+                    id: "chazzanut",
+                    num: "0094",
+                    genre: "Chazzanut",
+                    region: "Jewish",
+                    artist: "David Kusevitsky",
+                    title: "Cantorials",
+                    year: "1951",
+                    rel_out: ["klezmer"],
+                },
+
+                // ── CAUCASUS / CENTRAL ASIA ──
+                {
+                    id: "georgian",
+                    num: "0096",
+                    genre: "Georgian Folk",
+                    region: "Caucasus",
+                    artist: "The Rustavi Choir",
+                    title: "Georgian Voices",
+                    year: "1989",
+                    rel_out: ["rabiz"],
+                },
+                {
+                    id: "armenian",
+                    num: "0095",
+                    genre: "Armenian Folk",
+                    region: "Caucasus",
+                    artist: "Various",
+                    title: "Songs and Dances of Armenia",
+                    year: "1952",
+                    rel_out: ["rabiz"],
+                },
+                {
+                    id: "rabiz",
+                    num: "0099",
+                    genre: "Rabiz",
+                    region: "Caucasus",
+                    artist: "Aram Asadryan",
+                    title: "Ankakh Hayastan",
+                    year: "1992",
+                    rel_out: [],
+                },
+                {
+                    id: "kazakh",
+                    num: "0137",
+                    genre: "Kazakh Folk",
+                    region: "Central Asia",
+                    artist: "Various",
+                    title: "Songs from the Steppes — Kazakh Music Today",
+                    year: "2005",
+                    rel_out: ["kyrgyz", "tuvan"],
+                },
+                {
+                    id: "kyrgyz",
+                    num: "0139",
+                    genre: "Kyrgyz Folk",
+                    region: "Central Asia",
+                    artist: "Tengir-Too",
+                    title: "Mountain Music Of Kyrgyzstan",
+                    year: "2006",
+                    rel_out: ["tuvan"],
+                },
+                {
+                    id: "tuvan",
+                    num: "0144",
+                    genre: "Tuvan Throat Singing",
+                    region: "Central Asia",
+                    artist: "Various",
+                    title: "Throat Songs and Folk Tunes of Tuva",
+                    year: "2007",
+                    rel_out: ["mongolian_throat"],
+                },
+                {
+                    id: "uzbek",
+                    num: "0140",
+                    genre: "Uzbek Folk",
+                    region: "Central Asia",
+                    artist: "Turgun Alimatov",
+                    title: "Ouzbekistan",
+                    year: "1996",
+                    rel_out: ["shashmaqam"],
+                },
+                {
+                    id: "uyghur",
+                    num: "0141",
+                    genre: "Uyghur Folk",
+                    region: "Central Asia",
+                    artist: "Nebican Ölimli",
+                    title: "Authentic Uyghur Folk Music",
+                    year: "2018",
+                    rel_out: ["shashmaqam"],
+                },
+                {
+                    id: "sufiana",
+                    num: "0109",
+                    genre: "Sufiana Kalam",
+                    region: "South Asia",
+                    artist: "Ghulam Mohammad Saznavaz",
+                    title: "Kashmir — Sufyana Kalam",
+                    year: "2013",
+                    rel_out: ["qawwali"],
+                },
+
+                // ── MONGOLIA ──
+                {
+                    id: "mongolian_long",
+                    num: "0145",
+                    genre: "Mongolian Long Song",
+                    region: "Mongolia",
+                    artist: "Namdziliin Norovbanzad",
+                    title: "Mongolian Songs",
+                    year: "1999",
+                    rel_out: ["mongolian_throat"],
+                },
+                {
+                    id: "mongolian_throat",
+                    num: "0146",
+                    genre: "Mongolian Throat Singing",
+                    region: "Mongolia",
+                    artist: "Tserendavaa & Tsogtgerel",
+                    title: "Diphoniques de l'Altaï Mongol",
+                    year: "2008",
+                    rel_out: [],
+                },
+
+                // ── SOUTH ASIA ──
+                {
+                    id: "hindustani",
+                    num: "0130",
+                    genre: "Hindustani Classical",
+                    region: "North India",
+                    artist: "Ravi Shankar",
+                    title: "Music of India — Three Classical Ragas",
+                    year: "1956",
+                    rel_out: ["dhrupad", "khyal", "thumri", "qawwali"],
+                },
+                {
+                    id: "dhrupad",
+                    num: "0131",
+                    genre: "Dhrupad",
+                    region: "North India",
+                    artist: "Zia Mohiuddin Dagar",
+                    title: "Raga Yaman",
+                    year: "1991",
+                    rel_out: ["khyal"],
+                },
+                {
+                    id: "khyal",
+                    num: "0132",
+                    genre: "Khyal",
+                    region: "North India",
+                    artist: "Ashwini Bhide-Deshpande",
+                    title: "Le Chant Khyal",
+                    year: "2020",
+                    rel_out: ["thumri"],
+                },
+                {
+                    id: "thumri",
+                    num: "0133",
+                    genre: "Thumri",
+                    region: "North India",
+                    artist: "Various",
+                    title: "Immortal Thumris",
+                    year: "1981",
+                    rel_out: [],
+                },
+                {
+                    id: "qawwali",
+                    num: "0134",
+                    genre: "Qawwali",
+                    region: "South Asia",
+                    artist: "Nusrat Fateh Ali Khan",
+                    title: "Shahen-Shah",
+                    year: "1989",
+                    rel_out: [],
+                },
+                {
+                    id: "carnatic",
+                    num: "0125",
+                    genre: "Carnatic Classical",
+                    region: "South India",
+                    artist: "L. Subramaniam",
+                    title: "Anthologie de la musique classique de l'Inde du Sud",
+                    year: "1990",
+                    rel_out: ["odissi"],
+                },
+                {
+                    id: "odissi",
+                    num: "0129",
+                    genre: "Odissi Classical",
+                    region: "South India",
+                    artist: "Various",
+                    title: "Musique traditionnelle de danse Odissi",
+                    year: "1988",
+                    rel_out: [],
+                },
+                {
+                    id: "rajasthani",
+                    num: "0111",
+                    genre: "Rajasthani Folk",
+                    region: "North India",
+                    artist: "Various",
+                    title: "Rajasthani Folk Music — Langas and Manganiyars",
+                    year: "2005",
+                    rel_out: ["hindustani"],
+                },
+                {
+                    id: "bengali_baul",
+                    num: "0117",
+                    genre: "Bauls of Bengal",
+                    region: "East India",
+                    artist: "Various",
+                    title: "Indian Street Music — The Bauls of Bengal",
+                    year: "1971",
+                    rel_out: ["thumri"],
+                },
+                {
+                    id: "tibetan",
+                    num: "0195",
+                    genre: "Tibetan Folk",
+                    region: "Himalaya",
+                    artist: "Various",
+                    title: "Tibetan Folk Songs from Lhasa and Amdo",
+                    year: "1975",
+                    rel_out: ["hindustani"],
+                },
+
+                // ── EAST ASIA ──
+                {
+                    id: "guoyue",
+                    num: "0157",
+                    genre: "Guoyue",
+                    region: "China",
+                    artist: "Peng Xiuwen",
+                    title: "Master of Chinese Traditional Music",
+                    year: "2004",
+                    rel_out: ["jiangnan_sizhu", "shidaiqu"],
+                },
+                {
+                    id: "jiangnan_sizhu",
+                    num: "0156",
+                    genre: "Jiangnan Sizhu",
+                    region: "China",
+                    artist: "Various",
+                    title: "Sizhu — Silk Bamboo — Chamber Music of South China",
+                    year: "1995",
+                    rel_out: ["guoyue"],
+                },
+                {
+                    id: "shidaiqu",
+                    num: "0158",
+                    genre: "Shidaiqu",
+                    region: "China",
+                    artist: "Various",
+                    title: "Shanghai Nights",
+                    year: "1992",
+                    rel_out: ["mandopop", "cantopop"],
+                },
+                {
+                    id: "mandopop",
+                    num: "0159",
+                    genre: "Mandopop",
+                    region: "China",
+                    artist: "Teresa Teng",
+                    title: "Dan Dan You Qing",
+                    year: "1983",
+                    rel_out: [],
+                },
+                {
+                    id: "cantopop",
+                    num: "0178",
+                    genre: "Cantonese Opera",
+                    region: "China",
+                    artist: "Hong Kong Golden Voices",
+                    title: "Tang Kung Han Si",
+                    year: "1958",
+                    rel_out: ["mandopop"],
+                },
+                {
+                    id: "peking_opera",
+                    num: "0176",
+                    genre: "Peking Opera",
+                    region: "China",
+                    artist: "Various",
+                    title: "The Ruse of the Empty City",
+                    year: "1960",
+                    rel_out: ["shaoxing_opera", "cantonese_opera"],
+                },
+                {
+                    id: "shaoxing_opera",
+                    num: "0177",
+                    genre: "Shaoxing Opera",
+                    region: "China",
+                    artist: "Yuan Xuefen",
+                    title: "Romance of the Western Chamber",
+                    year: "1955",
+                    rel_out: [],
+                },
+                {
+                    id: "cantonese_opera",
+                    num: "0178b",
+                    genre: "Cantonese Opera Folk",
+                    region: "China",
+                    artist: "Hong Kong Golden Voices",
+                    title: "Cantonese Opera Songs",
+                    year: "1958",
+                    rel_out: [],
+                },
+
+                // ── JAPAN ──
+                {
+                    id: "gagaku",
+                    num: "0185",
+                    genre: "Gagaku",
+                    region: "Japan",
+                    artist: "The Kyoto Imperial Court Music Orchestra",
+                    title: "Gagaku — Imperial Court Music of Japan",
+                    year: "1964",
+                    rel_out: ["noh", "bugaku"],
+                },
+                {
+                    id: "noh",
+                    num: "0186",
+                    genre: "Noh",
+                    region: "Japan",
+                    artist: "The Kyoto Nohgaku Kai",
+                    title: "Japanese Noh Music",
+                    year: "1967",
+                    rel_out: ["nagauta", "joruri"],
+                },
+                {
+                    id: "nagauta",
+                    num: "0187",
+                    genre: "Nagauta",
+                    region: "Japan",
+                    artist: "The Azuma Kabuki Musicians",
+                    title: "Nagauta Music",
+                    year: "1954",
+                    rel_out: ["enka"],
+                },
+                {
+                    id: "joruri",
+                    num: "0188",
+                    genre: "Jōruri",
+                    region: "Japan",
+                    artist: "Various",
+                    title: "Music of the Great Japanese Bunraku Puppet Theater",
+                    year: "1969",
+                    rel_out: ["nagauta"],
+                },
+                {
+                    id: "sokyoku",
+                    num: "0183",
+                    genre: "Sōkyoku",
+                    region: "Japan",
+                    artist: "The Art of the Koto",
+                    title: "From Yatsuhashi to Miyagi",
+                    year: "2001",
+                    rel_out: ["jiuta"],
+                },
+                {
+                    id: "jiuta",
+                    num: "0182",
+                    genre: "Jiuta",
+                    region: "Japan",
+                    artist: "Ensemble Yonin no Kai",
+                    title: "Jiuta",
+                    year: "1981",
+                    rel_out: ["sokyoku"],
+                },
+                {
+                    id: "honkyoku",
+                    num: "0189",
+                    genre: "Honkyoku",
+                    region: "Japan",
+                    artist: "Gorō Yamaguchi",
+                    title: "Shakuhachi Music — A Bell Ringing in the Empty Sky",
+                    year: "1969",
+                    rel_out: ["jiuta"],
+                },
+                {
+                    id: "enka",
+                    num: "0166",
+                    genre: "Enka",
+                    region: "Japan",
+                    artist: "Various",
+                    title: "Japanese Retro Hits — The Fifties",
+                    year: "1956–1958",
+                    rel_out: ["idol_kayo"],
+                },
+                {
+                    id: "idol_kayo",
+                    num: "0168",
+                    genre: "Idol Kayō",
+                    region: "Japan",
+                    artist: "Akina Nakamori",
+                    title: "Variation",
+                    year: "1982",
+                    rel_out: ["techno_kayo"],
+                },
+                {
+                    id: "techno_kayo",
+                    num: "0169",
+                    genre: "Techno Kayō",
+                    region: "Japan",
+                    artist: "Akiko Yano",
+                    title: "Tadaima",
+                    year: "1981",
+                    rel_out: [],
+                },
+                {
+                    id: "bugaku",
+                    num: "0163",
+                    genre: "Kagura / Bugaku",
+                    region: "Japan",
+                    artist: "Various",
+                    title: "Kagura — Japanese Shinto Ritual Music",
+                    year: "1990",
+                    rel_out: [],
+                },
+                {
+                    id: "tsugaru",
+                    num: "0162",
+                    genre: "Tsugaru Shamisen",
+                    region: "Japan",
+                    artist: "Takahashi Chikuzan",
+                    title: "Tsugaru Shamisen",
+                    year: "1973",
+                    rel_out: ["enka"],
+                },
+                {
+                    id: "taiko",
+                    num: "0164",
+                    genre: "Taiko",
+                    region: "Japan",
+                    artist: "Kodo",
+                    title: "The Best of Kodo",
+                    year: "1994",
+                    rel_out: [],
+                },
+                {
+                    id: "ainu",
+                    num: "0152",
+                    genre: "Ainu Folk",
+                    region: "Japan",
+                    artist: "Various",
+                    title: "Japan — Ainu Songs",
+                    year: "1993",
+                    rel_out: ["upopo"],
+                },
+                {
+                    id: "upopo",
+                    num: "0153",
+                    genre: "Upopo",
+                    region: "Japan",
+                    artist: "Umeko Ando",
+                    title: "Upopo Sanke",
+                    year: "2003",
+                    rel_out: [],
+                },
+
+                // ── KOREA ──
+                {
+                    id: "aak",
+                    num: "0190",
+                    genre: "Aak — Korean Royal",
+                    region: "Korea",
+                    artist: "National Classical",
+                    title: "Aak — Ancient Music of the Korean Royal Court",
+                    year: "2007",
+                    rel_out: ["jeongak", "gagok"],
+                },
+                {
+                    id: "jeongak",
+                    num: "0191",
+                    genre: "Jeong-ak",
+                    region: "Korea",
+                    artist: "Kim Minjoung",
+                    title: "Jajinhannip Ajaeng Jeongak",
+                    year: "2018",
+                    rel_out: ["sanjo"],
+                },
+                {
+                    id: "gagok",
+                    num: "0192",
+                    genre: "Gagok",
+                    region: "Korea",
+                    artist: "Kim Wol-ha",
+                    title: "Chants lyriques gagok",
+                    year: "2014",
+                    rel_out: [],
+                },
+                {
+                    id: "sanjo",
+                    num: "0171",
+                    genre: "Sanjo",
+                    region: "Korea",
+                    artist: "Various",
+                    title: "Korean Kayagum Sanjo From 78RPM Records",
+                    year: "2013",
+                    rel_out: [],
+                },
+                {
+                    id: "sinawi",
+                    num: "0170",
+                    genre: "Sinawi",
+                    region: "Korea",
+                    artist: "Various",
+                    title: "Sinawi Music of Korea",
+                    year: "1992",
+                    rel_out: ["sanjo"],
+                },
+                {
+                    id: "trot",
+                    num: "0172",
+                    genre: "Trot",
+                    region: "Korea",
+                    artist: "The Kim Sisters",
+                    title: "Their First Album",
+                    year: "1959",
+                    rel_out: ["idol_kayo"],
+                },
+
+                // ── SOUTHEAST ASIA ──
+                {
+                    id: "gamelan_jawa",
+                    num: "0240",
+                    genre: "Gamelan Jawa",
+                    region: "Indonesia",
+                    artist: "K.R.T. Wasitodiningrat",
+                    title: "Javanese Court Gamelan",
+                    year: "1971",
+                    rel_out: ["gamelan_degung", "tembang"],
+                },
+                {
+                    id: "gamelan_degung",
+                    num: "0242",
+                    genre: "Gamelan Degung",
+                    region: "Indonesia",
+                    artist: "Suara Parahiangan",
+                    title: "Degung — Music of West Java",
+                    year: "1995",
+                    rel_out: ["jaipongan"],
+                },
+                {
+                    id: "gamelan_bali",
+                    num: "0244",
+                    genre: "Gamelan Gong Kebyar",
+                    region: "Indonesia",
+                    artist: "The Gamelan Ensemble of STSI",
+                    title: "Music of the Gamelan Gong Kebyar",
+                    year: "1996",
+                    rel_out: ["kecak"],
+                },
+                {
+                    id: "kecak",
+                    num: "0217",
+                    genre: "Kecak",
+                    region: "Indonesia",
+                    artist: "Kecak Ganda Sari",
+                    title: "Kecak From Bali",
+                    year: "1990",
+                    rel_out: [],
+                },
+                {
+                    id: "jaipongan",
+                    num: "0220",
+                    genre: "Jaipongan",
+                    region: "Indonesia",
+                    artist: "Itoh Masyitoh",
+                    title: "Naon Margina",
+                    year: "1980",
+                    rel_out: ["dangdut"],
+                },
+                {
+                    id: "tembang",
+                    num: "0235",
+                    genre: "Tembang Cianjuran",
+                    region: "Indonesia",
+                    artist: "Linkungan Seni Malati Ida",
+                    title: "Java — Tembang Sunda",
+                    year: "1994",
+                    rel_out: ["gamelan_jawa"],
+                },
+                {
+                    id: "keroncong",
+                    num: "0218",
+                    genre: "Keroncong",
+                    region: "Indonesia",
+                    artist: "Various",
+                    title: "Kroncong — Early Indonesian Pop Music",
+                    year: "2006",
+                    rel_out: ["dangdut"],
+                },
+                {
+                    id: "dangdut",
+                    num: "0222",
+                    genre: "Dangdut",
+                    region: "Indonesia",
+                    artist: "Various",
+                    title: "Indonesia Pop Nostalgia",
+                    year: "2012",
+                    rel_out: ["dangdut_koplo"],
+                },
+                {
+                    id: "dangdut_koplo",
+                    num: "0223",
+                    genre: "Dangdut Koplo",
+                    region: "Indonesia",
+                    artist: "Various",
+                    title: "Super Hits Dangdut Koplo",
+                    year: "2016",
+                    rel_out: [],
+                },
+                {
+                    id: "piphat",
+                    num: "0232",
+                    genre: "Piphat",
+                    region: "Thailand",
+                    artist: "Fong Naam",
+                    title: "Siamese Classical Music — The Piphat Ensemble",
+                    year: "1991",
+                    rel_out: ["mahori", "molam"],
+                },
+                {
+                    id: "mahori",
+                    num: "0233",
+                    genre: "Mahori",
+                    region: "Thailand",
+                    artist: "Fong Naam",
+                    title: "Siamese Classical Music — The Mahori Orchestra",
+                    year: "1993",
+                    rel_out: [],
+                },
+                {
+                    id: "molam",
+                    num: "0202",
+                    genre: "Molam",
+                    region: "Thailand",
+                    artist: "Various",
+                    title: "Molam — Thai Country Groove From Isan",
+                    year: "2005",
+                    rel_out: ["luk_thung"],
+                },
+                {
+                    id: "luk_thung",
+                    num: "0206",
+                    genre: "Luk Thung",
+                    region: "Thailand",
+                    artist: "Various",
+                    title: "Luk Thung — Classic 78s From the Thai Countryside",
+                    year: "2011",
+                    rel_out: ["luk_krung"],
+                },
+                {
+                    id: "luk_krung",
+                    num: "0207",
+                    genre: "Luk Krung",
+                    region: "Thailand",
+                    artist: "Suthep Wongkamhaeng",
+                    title: "Luk Krung",
+                    year: "",
+                    rel_out: [],
+                },
+                {
+                    id: "pinpeat",
+                    num: "0234",
+                    genre: "Pinpeat",
+                    region: "Cambodia",
+                    artist: "Sam-Ang Sam Ensemble",
+                    title: "Echoes from the Palace — Cambodian Court",
+                    year: "1996",
+                    rel_out: ["piphat"],
+                },
+                {
+                    id: "vietnamese_classical",
+                    num: "0193",
+                    genre: "Vietnamese Classical",
+                    region: "Vietnam",
+                    artist: "Dr. Phong Nguyen",
+                    title: "Instrumental Music of Vietnam — Dan Tranh",
+                    year: "1983",
+                    rel_out: ["nhac_vang"],
+                },
+                {
+                    id: "nhac_vang",
+                    num: "0174",
+                    genre: "Nhạc Vàng",
+                    region: "Vietnam",
+                    artist: "Various",
+                    title: "Saigon Supersound — Volume 1",
+                    year: "1965–1975",
+                    rel_out: [],
+                },
+
+                // ── PACIFIC ──
+                {
+                    id: "maori",
+                    num: "0227",
+                    genre: "Māori Folk",
+                    region: "Pacific",
+                    artist: "Various",
+                    title: "Maori Songs of New Zealand",
+                    year: "1952",
+                    rel_out: ["slack_key"],
+                },
+                {
+                    id: "slack_key",
+                    num: "0228",
+                    genre: "Slack-Key Guitar",
+                    region: "Pacific",
+                    artist: "Gabby Pahinui",
+                    title: "Gabby",
+                    year: "1972",
+                    rel_out: [],
+                },
+                {
+                    id: "pacific_chants",
+                    num: "0226",
+                    genre: "Himene Tarava",
+                    region: "Pacific",
+                    artist: "Various",
+                    title: "Pacific Chants",
+                    year: "1978–1988",
+                    rel_out: ["maori"],
+                },
+                {
+                    id: "papuan",
+                    num: "0245",
+                    genre: "Papuan Folk",
+                    region: "Pacific",
+                    artist: "Various",
+                    title: "Crying Bamboos — Flute Music From New Guinea",
+                    year: "2018",
+                    rel_out: [],
+                },
+                {
+                    id: "australian",
+                    num: "0249",
+                    genre: "Indigenous Australian Folk",
+                    region: "Pacific",
+                    artist: "Various",
+                    title: "Tribal Music of Australia",
+                    year: "1953",
+                    rel_out: ["papuan"],
+                },
+
+                // ── AMERICAS INDIGENOUS ──
+                {
+                    id: "inuit",
+                    num: "0250",
+                    genre: "Inuit Folk",
+                    region: "North America",
+                    artist: "Various",
+                    title: "Eskimo Songs From Alaska",
+                    year: "1966",
+                    rel_out: ["navajo"],
+                },
+                {
+                    id: "navajo",
+                    num: "0251",
+                    genre: "Navajo Folk",
+                    region: "North America",
+                    artist: "Various",
+                    title: "Navajo Songs",
+                    year: "1933–1940",
+                    rel_out: ["sioux"],
+                },
+                {
+                    id: "sioux",
+                    num: "0253",
+                    genre: "Sioux Folk",
+                    region: "North America",
+                    artist: "Takini",
+                    title: "Music of the Lakota Sioux",
+                    year: "1994",
+                    rel_out: [],
+                },
+                {
+                    id: "maya",
+                    num: "0254",
+                    genre: "Maya Folk",
+                    region: "Mesoamerica",
+                    artist: "Various",
+                    title: "Música de los Pueblos Mayas",
+                    year: "1993",
+                    rel_out: ["andean"],
+                },
+                {
+                    id: "andean",
+                    num: "0255",
+                    genre: "Indigenous Andean Folk",
+                    region: "South America",
+                    artist: "Luzmila Carpio",
+                    title: "Yuyay Jap'ina Tapes",
+                    year: "2014",
+                    rel_out: ["cumbia"],
+                },
+                {
+                    id: "amazonian",
+                    num: "0256",
+                    genre: "Indigenous Amazonian Folk",
+                    region: "South America",
+                    artist: "Various",
+                    title: "Indian Music of the Upper Amazon",
+                    year: "1954",
+                    rel_out: ["andean"],
+                },
+                {
+                    id: "guarani",
+                    num: "0257",
+                    genre: "Guaraní Folk",
+                    region: "South America",
+                    artist: "Various",
+                    title: "Paraguay — Guaraní",
+                    year: "2011",
+                    rel_out: ["cumbia"],
+                },
+                {
+                    id: "mapuche",
+                    num: "0258",
+                    genre: "Mapuche Folk",
+                    region: "South America",
+                    artist: "Aflaiai",
+                    title: "Mapuche Folk",
+                    year: "1998",
+                    rel_out: [],
+                },
+                {
+                    id: "cumbia",
+                    num: "0309",
+                    genre: "Cumbia",
+                    region: "Latin America",
+                    artist: "Various",
+                    title: "Cumbia Colombiana",
+                    year: "",
+                    rel_out: ["son_cubano", "salsa"],
+                },
+                {
+                    id: "son_cubano",
+                    num: "0306",
+                    genre: "Son Cubano",
+                    region: "Latin America",
+                    artist: "Various",
+                    title: "Son Cubano",
+                    year: "",
+                    rel_out: ["salsa", "rumba"],
+                },
+                {
+                    id: "rumba",
+                    num: "0311",
+                    genre: "Afro-Cuban Rumba",
+                    region: "Latin America",
+                    artist: "Various",
+                    title: "Afro-Cuban Rumba",
+                    year: "",
+                    rel_out: ["salsa"],
+                },
+                {
+                    id: "salsa",
+                    num: "0313",
+                    genre: "Salsa",
+                    region: "Latin America",
+                    artist: "Various",
+                    title: "Salsa Clásica",
+                    year: "",
+                    rel_out: [],
+                },
+                {
+                    id: "tango",
+                    num: "0307",
+                    genre: "Tango",
+                    region: "Latin America",
+                    artist: "Various",
+                    title: "Tango — Buenos Aires",
+                    year: "",
+                    rel_out: ["bossa_nova"],
+                },
+                {
+                    id: "bossa_nova",
+                    num: "0308",
+                    genre: "Bossa Nova",
+                    region: "Latin America",
+                    artist: "Various",
+                    title: "Bossa Nova Classics",
+                    year: "",
+                    rel_out: [],
+                },
+                {
+                    id: "mariachi",
+                    num: "0315",
+                    genre: "Mariachi",
+                    region: "Latin America",
+                    artist: "Various",
+                    title: "Mariachi Clásico",
+                    year: "",
+                    rel_out: ["cumbia"],
+                },
+
+                // ── EUROPEAN FOLK ──
+                {
+                    id: "rembetika",
+                    num: "0262",
+                    genre: "Rembetika",
+                    region: "Greece",
+                    artist: "Various",
+                    title: "The Rough Guide to Rebetika",
+                    year: "2004",
+                    rel_out: ["laika"],
+                },
+                {
+                    id: "laika",
+                    num: "0267",
+                    genre: "Laika",
+                    region: "Greece",
+                    artist: "Stelios Kazantzidis",
+                    title: "Iparho",
+                    year: "1975",
+                    rel_out: ["entechna_laika"],
+                },
+                {
+                    id: "entechna",
+                    num: "0265",
+                    genre: "Entechna",
+                    region: "Greece",
+                    artist: "Manos Hadjidakis",
+                    title: "Gioconda's Smile",
+                    year: "1965",
+                    rel_out: ["neo_kyma"],
+                },
+                {
+                    id: "neo_kyma",
+                    num: "0266",
+                    genre: "Neo Kyma",
+                    region: "Greece",
+                    artist: "Dionysis Savvopoulos",
+                    title: "Fortigo",
+                    year: "1966",
+                    rel_out: ["entechna_laika"],
+                },
+                {
+                    id: "entechna_laika",
+                    num: "0268",
+                    genre: "Entechna Laika",
+                    region: "Greece",
+                    artist: "Manos Loizos & Haris Alexiou",
+                    title: "Ta Tragoudia Tis Haroulas",
+                    year: "1979",
+                    rel_out: ["laika_modern"],
+                },
+                {
+                    id: "laika_modern",
+                    num: "0269",
+                    genre: "Modern Laika",
+                    region: "Greece",
+                    artist: "Anna Vissi",
+                    title: "Travma",
+                    year: "1997",
+                    rel_out: [],
+                },
+                {
+                    id: "bulgarian_folk",
+                    num: "0270",
+                    genre: "Bulgarian Folk",
+                    region: "Balkans",
+                    artist: "Ensemble of the Bulgarian Republic",
+                    title: "Music of Bulgaria",
+                    year: "1955",
+                    rel_out: ["turbo_folk"],
+                },
+                {
+                    id: "serbian_folk",
+                    num: "0272",
+                    genre: "Serbian/Croatian Folk",
+                    region: "Balkans",
+                    artist: "Vujicsics",
+                    title: "Serb and Croat Folk Music",
+                    year: "1988",
+                    rel_out: ["turbo_folk"],
+                },
+                {
+                    id: "turbo_folk",
+                    num: "0274",
+                    genre: "Turbo-Folk",
+                    region: "Balkans",
+                    artist: "Ceca",
+                    title: "Kukavica",
+                    year: "1993",
+                    rel_out: [],
+                },
+                {
+                    id: "romanian_folk",
+                    num: "0285",
+                    genre: "Romanian Folk",
+                    region: "Eastern Europe",
+                    artist: "Various",
+                    title: "Folk Music of Rumania",
+                    year: "1951",
+                    rel_out: ["muzica_lautareasca"],
+                },
+                {
+                    id: "muzica_lautareasca",
+                    num: "0286",
+                    genre: "Muzică Lăutărească",
+                    region: "Eastern Europe",
+                    artist: "Taraf de Haïdouks",
+                    title: "Musique des Tziganes de Roumanie",
+                    year: "1991",
+                    rel_out: [],
+                },
+                {
+                    id: "russian_folk",
+                    num: "0280",
+                    genre: "Russian Folk",
+                    region: "Eastern Europe",
+                    artist: "The Piatnitsky Chorus",
+                    title: "Russian Folk Songs",
+                    year: "1954",
+                    rel_out: ["ukrainian_folk"],
+                },
+                {
+                    id: "ukrainian_folk",
+                    num: "0282",
+                    genre: "Ukrainian Folk",
+                    region: "Eastern Europe",
+                    artist: "Various",
+                    title: "Music of the Ukraine",
+                    year: "1951",
+                    rel_out: [],
+                },
+                {
+                    id: "polish_folk",
+                    num: "0275",
+                    genre: "Polish Folk",
+                    region: "Eastern Europe",
+                    artist: "Various",
+                    title: "Pologne — Chansons et danses populaires",
+                    year: "1993",
+                    rel_out: ["polka"],
+                },
+                {
+                    id: "polka",
+                    num: "0278",
+                    genre: "Polka",
+                    region: "Eastern Europe",
+                    artist: "Various",
+                    title: "Texas-Czech Bohemian-Moravian Bands",
+                    year: "1929–1959",
+                    rel_out: [],
+                },
+                {
+                    id: "romani_folk",
+                    num: "0114",
+                    genre: "Romani Folk",
+                    region: "Europe",
+                    artist: "Various",
+                    title: "The Rough Guide to the Music of the Gypsies",
+                    year: "1999",
+                    rel_out: ["flamenco", "muzica_lautareasca", "turbo_folk"],
+                },
+
+                // ── EUROPEAN CLASSICAL ──
+                {
+                    id: "gregorian",
+                    num: "0296",
+                    genre: "Gregorian Chant",
+                    region: "European Classical",
+                    artist: "Benedictine Monks",
+                    title: "Gregorian Chant",
+                    year: "",
+                    rel_out: ["baroque"],
+                },
+                {
+                    id: "baroque",
+                    num: "0297",
+                    genre: "Baroque",
+                    region: "European Classical",
+                    artist: "Johann Sebastian Bach",
+                    title: "The Well-Tempered Clavier",
+                    year: "1722",
+                    rel_out: ["classical_period", "romantic"],
+                },
+                {
+                    id: "classical_period",
+                    num: "0298",
+                    genre: "Classical Period",
+                    region: "European Classical",
+                    artist: "Wolfgang Amadeus Mozart",
+                    title: "Symphony No. 40",
+                    year: "1788",
+                    rel_out: ["romantic"],
+                },
+                {
+                    id: "romantic",
+                    num: "0299",
+                    genre: "Romantic",
+                    region: "European Classical",
+                    artist: "Ludwig van Beethoven",
+                    title: "Symphony No. 9",
+                    year: "1824",
+                    rel_out: ["late_romantic", "impressionism"],
+                },
+                {
+                    id: "late_romantic",
+                    num: "0302",
+                    genre: "Late Romantic",
+                    region: "European Classical",
+                    artist: "Johannes Brahms",
+                    title: "Symphony No. 4",
+                    year: "1885",
+                    rel_out: ["modernist"],
+                },
+                {
+                    id: "impressionism",
+                    num: "0303",
+                    genre: "Impressionism",
+                    region: "European Classical",
+                    artist: "Claude Debussy",
+                    title: "Préludes — Book 1",
+                    year: "1910",
+                    rel_out: ["modernist"],
+                },
+                {
+                    id: "modernist",
+                    num: "0304",
+                    genre: "Modernist / Avant-garde",
+                    region: "European Classical",
+                    artist: "Igor Stravinsky",
+                    title: "The Rite of Spring",
+                    year: "1913",
+                    rel_out: [],
+                },
+
+                // ── FLAMENCO / IBERIAN ──
+                {
+                    id: "flamenco",
+                    num: "0320",
+                    genre: "Flamenco",
+                    region: "Iberia",
+                    artist: "Various",
+                    title: "Flamenco — Cante Jondo",
+                    year: "",
+                    rel_out: ["bossa_nova", "latin_jazz"],
+                },
+                {
+                    id: "latin_jazz",
+                    num: "0321",
+                    genre: "Latin Jazz",
+                    region: "Americas",
+                    artist: "Various",
+                    title: "Latin Jazz — Roots",
+                    year: "",
+                    rel_out: ["bossa_nova", "salsa"],
+                },
+            ];
+
+            // ── region colour map ──
+            const REGION_COLOR = {
+                Ancient: "#7a6a4a",
+                "Ancient East Asia": "#6a5a3a",
+                Religious: "#5a4a6a",
+                "Southern Africa": "#3a6a4a",
+                "Central Africa": "#2a5a3a",
+                "West Africa": "#1a6a2a",
+                "East Africa": "#2a7a3a",
+                "Horn of Africa": "#4a7a2a",
+                "North Africa": "#7a7a2a",
+                "Middle East": "#8a6a2a",
+                "Central Asia": "#8a5a1a",
+                "South Asia": "#8a3a1a",
+                Himalaya: "#7a3a2a",
+                Jewish: "#6a3a5a",
+                Caucasus: "#5a3a6a",
+                Mongolia: "#4a5a7a",
+                China: "#3a4a8a",
+                Japan: "#2a3a8a",
+                Korea: "#1a3a7a",
+                "Southeast Asia": "#1a5a7a",
+                Indonesia: "#1a6a7a",
+                Thailand: "#1a7a6a",
+                Cambodia: "#2a7a5a",
+                Vietnam: "#2a6a5a",
+                Pacific: "#3a6a6a",
+                "North America": "#3a3a6a",
+                Mesoamerica: "#4a3a5a",
+                "South America": "#5a2a4a",
+                "Latin America": "#6a2a3a",
+                Greece: "#7a2a2a",
+                Balkans: "#7a3a3a",
+                "Eastern Europe": "#6a4a4a",
+                Europe: "#6a5a5a",
+                "European Classical": "#4a5a6a",
+                "North India": "#8a4a1a",
+                "South India": "#9a3a1a",
+                "East India": "#7a4a2a",
+                Iberia: "#8a2a2a",
+                Americas: "#6a2a4a",
+            };
+
+            function getColor(region) {
+                return REGION_COLOR[region] || "#3a3a4a";
+            }
+
+            // ═══════════════════════════════════════════════════
+            // LAYOUT — force-directed-ish manual placement by region clusters
+            // ═══════════════════════════════════════════════════
+            const NW = 280,
+                NH = 130,
+                GAPX = 60,
+                GAPY = 50;
+
+            function assignPositions() {
+                // cluster groups by region category
+                const clusters = {
+                    ancient: [
+                        "prehistoric",
+                        "ancient_sumerian",
+                        "ancient_greek",
+                        "ancient_roman",
+                        "ancient_japanese",
+                        "ancient_korean",
+                        "ancient_levitical",
+                    ],
+                    religious: [
+                        "syriac_chant",
+                        "byzantine_chant",
+                        "vedic",
+                        "taoist",
+                        "gregorian",
+                        "mevlevi",
+                        "chazzanut",
+                    ],
+                    s_africa: [
+                        "khoisan",
+                        "sotho_tswana",
+                        "nguni",
+                        "shona_mbira",
+                        "mbube",
+                        "chimurenga",
+                        "jit",
+                        "township_jive",
+                    ],
+                    c_africa: [
+                        "pygmy",
+                        "central_african",
+                        "semba",
+                        "bikutsi",
+                        "makossa",
+                        "soukous",
+                        "kizomba",
+                        "kuduro",
+                    ],
+                    w_africa: [
+                        "griot",
+                        "mande",
+                        "wolof",
+                        "palm_wine",
+                        "juju",
+                        "highlife",
+                        "afrobeat",
+                        "fuji",
+                        "mbalax",
+                        "zouglou",
+                        "balani",
+                        "gumbe",
+                    ],
+                    e_africa: [
+                        "muziki_dansi",
+                        "benga",
+                        "kapuka",
+                        "singeli",
+                        "marrabenta",
+                        "timbila",
+                    ],
+                    horn: ["azmari", "tizita", "qaraami"],
+                    n_africa: [
+                        "gnawa",
+                        "amazigh",
+                        "tuareg",
+                        "tishoumaren",
+                        "moorish",
+                        "proto_rai",
+                        "shaabi",
+                        "mahraganat",
+                    ],
+                    middle_east: [
+                        "arabic_classical",
+                        "arabic_pop",
+                        "baladi",
+                        "arabic_bellydance",
+                        "dabke",
+                        "persian_classical",
+                        "turkish_classical",
+                        "ottoman_military",
+                        "arabesque",
+                        "shashmaqam",
+                    ],
+                    sephardic: ["sephardic", "ashkenazi", "klezmer"],
+                    caucasus: [
+                        "georgian",
+                        "armenian",
+                        "rabiz",
+                        "kazakh",
+                        "kyrgyz",
+                        "tuvan",
+                        "uzbek",
+                        "uyghur",
+                        "sufiana",
+                    ],
+                    mongolia: ["mongolian_long", "mongolian_throat"],
+                    s_asia: [
+                        "hindustani",
+                        "dhrupad",
+                        "khyal",
+                        "thumri",
+                        "qawwali",
+                        "carnatic",
+                        "odissi",
+                        "rajasthani",
+                        "bengali_baul",
+                        "tibetan",
+                    ],
+                    e_asia_china: [
+                        "guoyue",
+                        "jiangnan_sizhu",
+                        "shidaiqu",
+                        "mandopop",
+                        "cantopop",
+                        "peking_opera",
+                        "shaoxing_opera",
+                        "cantonese_opera",
+                    ],
+                    japan: [
+                        "gagaku",
+                        "noh",
+                        "nagauta",
+                        "joruri",
+                        "sokyoku",
+                        "jiuta",
+                        "honkyoku",
+                        "enka",
+                        "idol_kayo",
+                        "techno_kayo",
+                        "bugaku",
+                        "tsugaru",
+                        "taiko",
+                        "ainu",
+                        "upopo",
+                    ],
+                    korea: [
+                        "aak",
+                        "jeongak",
+                        "gagok",
+                        "sanjo",
+                        "sinawi",
+                        "trot",
+                    ],
+                    sea: [
+                        "gamelan_jawa",
+                        "gamelan_degung",
+                        "gamelan_bali",
+                        "kecak",
+                        "jaipongan",
+                        "tembang",
+                        "keroncong",
+                        "dangdut",
+                        "dangdut_koplo",
+                        "piphat",
+                        "mahori",
+                        "molam",
+                        "luk_thung",
+                        "luk_krung",
+                        "pinpeat",
+                        "vietnamese_classical",
+                        "nhac_vang",
+                    ],
+                    pacific: [
+                        "maori",
+                        "slack_key",
+                        "pacific_chants",
+                        "papuan",
+                        "australian",
+                    ],
+                    americas: [
+                        "inuit",
+                        "navajo",
+                        "sioux",
+                        "maya",
+                        "andean",
+                        "amazonian",
+                        "guarani",
+                        "mapuche",
+                        "cumbia",
+                        "son_cubano",
+                        "rumba",
+                        "salsa",
+                        "tango",
+                        "bossa_nova",
+                        "mariachi",
+                    ],
+                    eu_folk: [
+                        "rembetika",
+                        "laika",
+                        "entechna",
+                        "neo_kyma",
+                        "entechna_laika",
+                        "laika_modern",
+                        "bulgarian_folk",
+                        "serbian_folk",
+                        "turbo_folk",
+                        "romanian_folk",
+                        "muzica_lautareasca",
+                        "russian_folk",
+                        "ukrainian_folk",
+                        "polish_folk",
+                        "polka",
+                        "romani_folk",
+                    ],
+                    eu_classical: [
+                        "baroque",
+                        "classical_period",
+                        "romantic",
+                        "late_romantic",
+                        "impressionism",
+                        "modernist",
+                    ],
+                    iberia: ["flamenco", "latin_jazz"],
+                };
+
+                // cluster base positions [col, row] in a large grid
+                const BASE = {
+                    ancient: [0, 0],
+                    religious: [4, 0],
+                    s_africa: [0, 4],
+                    c_africa: [0, 7],
+                    w_africa: [2, 5],
+                    e_africa: [2, 8],
+                    horn: [4, 7],
+                    n_africa: [5, 4],
+                    middle_east: [6, 2],
+                    sephardic: [9, 1],
+                    caucasus: [8, 2],
+                    mongolia: [10, 2],
+                    s_asia: [10, 4],
+                    e_asia_china: [13, 2],
+                    japan: [14, 5],
+                    korea: [13, 8],
+                    sea: [12, 10],
+                    pacific: [15, 10],
+                    americas: [0, 11],
+                    eu_folk: [5, 8],
+                    eu_classical: [7, 8],
+                    iberia: [6, 11],
+                };
+
+                const pos = {};
+                for (const [cluster, ids] of Object.entries(clusters)) {
+                    const [baseCol, baseRow] = BASE[cluster] || [0, 0];
+                    ids.forEach((id, i) => {
+                        const col = baseCol + (i % 3);
+                        const row = baseRow + Math.floor(i / 3);
+                        pos[id] = {
+                            x: col * (NW + GAPX) + 40,
+                            y: row * (NH + GAPY) + 80,
+                        };
+                    });
+                }
+                return pos;
+            }
+
+            const positions = assignPositions();
+
+            // apply positions to any genre not explicitly placed
+            GENRES.forEach((g) => {
+                if (!positions[g.id]) {
+                    positions[g.id] = {
+                        x: Math.random() * 4000,
+                        y: Math.random() * 3000,
+                    };
+                }
+            });
+
+            // ═══════════════════════════════════════════════════
+            // RENDER
+            // ═══════════════════════════════════════════════════
+            const graph = document.getElementById("graph");
+            const svgEl = document.getElementById("canvas-layer");
+            let tx = 0,
+                ty = 0,
+                scale = 0.55;
+
+            function applyTransform(animated = false) {
+                graph.style.transition = animated
+                    ? "transform 0.5s cubic-bezier(0.25,0.46,0.45,0.94)"
+                    : "none";
+                graph.style.transform = `translate(${tx}px,${ty}px) scale(${scale})`;
+                drawEdges();
+            }
+
+            // ── build nodes ──
+            const nodeEls = {};
+            GENRES.forEach((g) => {
+                const pos = positions[g.id];
+                const div = document.createElement("div");
+                div.className = "node";
+                div.id = "node-" + g.id;
+                div.style.left = pos.x + "px";
+                div.style.top = pos.y + "px";
+                div.style.borderTopColor = getColor(g.region);
+                div.style.borderTopWidth = "2px";
+
+                const allRels = [
+                    ...g.rel_out.map((r) => ({ id: r, dir: "out" })),
+                    ...GENRES.filter((gg) => gg.rel_out.includes(g.id)).map(
+                        (gg) => ({ id: gg.id, dir: "in" }),
+                    ),
+                ];
+
+                const relPills = allRels
+                    .map((r) => {
+                        const target = GENRES.find((gg) => gg.id === r.id);
+                        if (!target) return "";
+                        return `<span class="rel-pill ${r.dir === "out" ? "outgoing" : "incoming"}" data-target="${r.id}" title="${r.dir === "out" ? "→" : "←"} ${target.genre}">
+      ${r.dir === "out" ? "→" : "←"} ${target.genre}
+    </span>`;
+                    })
+                    .join("");
+
+                div.innerHTML = `
+    <div class="node-header">
+      <span class="node-num">${g.num}</span>
+      <div>
+        <div class="node-genre">${g.genre}</div>
+        <div class="node-region">${g.region}</div>
+      </div>
+    </div>
+    <div class="node-body">
+      <div class="node-title">${g.title}</div>
+      <div class="node-artist">${g.artist}</div>
+      ${g.year ? `<div class="node-year">${g.year}</div>` : ""}
+    </div>
+    ${allRels.length > 0 ? `<div class="node-relations">${relPills}</div>` : ""}
+  `;
+
+                div.addEventListener("click", () => activateNode(g.id));
+                div.querySelectorAll(".rel-pill").forEach((pill) => {
+                    pill.addEventListener("click", (e) => {
+                        e.stopPropagation();
+                        navigateTo(pill.dataset.target);
+                    });
+                });
+
+                graph.appendChild(div);
+                nodeEls[g.id] = div;
+            });
+
+            // ── edges ──
+            const edgeEls = {};
+
+            function getNodeCenter(id) {
+                const pos = positions[id];
+                if (!pos) return null;
+                const el = nodeEls[id];
+                const w = el ? el.offsetWidth || NW : NW;
+                const h = el ? el.offsetHeight || NH : NH;
+                return {
+                    x: pos.x + w / 2,
+                    y: pos.y + h / 2,
+                    top: { x: pos.x + w / 2, y: pos.y },
+                    bot: { x: pos.x + w / 2, y: pos.y + h },
+                    left: { x: pos.x, y: pos.y + h / 2 },
+                    right: { x: pos.x + w, y: pos.y + h / 2 },
+                };
+            }
+
+            function bestAnchors(a, b) {
+                const dx = b.x - a.x,
+                    dy = b.y - a.y;
+                if (Math.abs(dx) > Math.abs(dy)) {
+                    return dx > 0 ? [a.right, b.left] : [a.left, b.right];
+                } else {
+                    return dy > 0 ? [a.bot, b.top] : [a.top, b.bot];
+                }
+            }
+
+            function curvePath(p1, p2) {
+                const mx = (p1.x + p2.x) / 2;
+                const my = (p1.y + p2.y) / 2;
+                const dx = p2.x - p1.x,
+                    dy = p2.y - p1.y;
+                const cx = mx - dy * 0.2,
+                    cy = my + dx * 0.2;
+                return `M${p1.x},${p1.y} Q${cx},${cy} ${p2.x},${p2.y}`;
+            }
+
+            function makeEdge(fromId, toId) {
+                const key = fromId + "__" + toId;
+                if (edgeEls[key]) return;
+                const path = document.createElementNS(
+                    "http://www.w3.org/2000/svg",
+                    "path",
+                );
+                path.setAttribute("fill", "none");
+                path.setAttribute("stroke", "rgba(255,255,255,0.06)");
+                path.setAttribute("stroke-width", "1");
+                path.setAttribute("marker-end", "url(#arr-dim)");
+                path.dataset.from = fromId;
+                path.dataset.to = toId;
+                svgEl.appendChild(path);
+                edgeEls[key] = path;
+            }
+
+            GENRES.forEach((g) => {
+                g.rel_out.forEach((t) => makeEdge(g.id, t));
+            });
+
+            let activeId = null;
+
+            function drawEdges() {
+                const rect = document.body.getBoundingClientRect();
+                svgEl.setAttribute(
+                    "viewBox",
+                    `0 0 ${rect.width} ${rect.height}`,
+                );
+
+                for (const [key, path] of Object.entries(edgeEls)) {
+                    const fromId = path.dataset.from;
+                    const toId = path.dataset.to;
+                    const a = getNodeCenter(fromId);
+                    const b = getNodeCenter(toId);
+                    if (!a || !b) {
+                        path.setAttribute("d", "");
+                        continue;
+                    }
+
+                    // world → screen
+                    function ws(pt) {
+                        return { x: pt.x * scale + tx, y: pt.y * scale + ty };
+                    }
+
+                    const [ap, bp] = bestAnchors(a, b);
+                    const p1s = ws(ap),
+                        p2s = ws(bp);
+
+                    const isActive =
+                        activeId && (fromId === activeId || toId === activeId);
+                    const isRelated =
+                        activeId &&
+                        (GENRES.find(
+                            (g) => g.id === activeId,
+                        )?.rel_out.includes(toId) ||
+                            GENRES.find(
+                                (g) => g.id === activeId,
+                            )?.rel_out.includes(fromId) ||
+                            fromId === activeId ||
+                            toId === activeId);
+
+                    if (activeId) {
+                        if (isActive) {
+                            path.setAttribute(
+                                "stroke",
+                                fromId === activeId
+                                    ? "rgba(200,169,110,0.6)"
+                                    : "rgba(126,184,200,0.5)",
+                            );
+                            path.setAttribute("stroke-width", "1.5");
+                            path.setAttribute(
+                                "marker-end",
+                                fromId === activeId
+                                    ? "url(#arr-gold)"
+                                    : "url(#arr-blue)",
+                            );
+                        } else {
+                            path.setAttribute(
+                                "stroke",
+                                "rgba(255,255,255,0.03)",
+                            );
+                            path.setAttribute("stroke-width", "0.5");
+                            path.setAttribute("marker-end", "url(#arr-dim)");
+                        }
+                    } else {
+                        path.setAttribute("stroke", "rgba(255,255,255,0.06)");
+                        path.setAttribute("stroke-width", "1");
+                        path.setAttribute("marker-end", "url(#arr-dim)");
+                    }
+
+                    path.setAttribute("d", curvePath(p1s, p2s));
+                }
+            }
+
+            function activateNode(id) {
+                if (activeId === id) {
+                    // deactivate
+                    activeId = null;
+                    Object.values(nodeEls).forEach((el) => {
+                        el.classList.remove("active", "dimmed");
+                    });
+                    drawEdges();
+                    return;
+                }
+                activeId = id;
+                const genre = GENRES.find((g) => g.id === id);
+                const related = new Set([
+                    id,
+                    ...(genre?.rel_out || []),
+                    ...GENRES.filter((g) => g.rel_out.includes(id)).map(
+                        (g) => g.id,
+                    ),
+                ]);
+
+                Object.entries(nodeEls).forEach(([nid, el]) => {
+                    el.classList.remove("active", "dimmed");
+                    if (nid === id) el.classList.add("active");
+                    else if (!related.has(nid)) el.classList.add("dimmed");
+                });
+                drawEdges();
+            }
+
+            function navigateTo(id) {
+                const pos = positions[id];
+                if (!pos) return;
+                activateNode(id);
+                const vw = window.innerWidth,
+                    vh = window.innerHeight;
+                const el = nodeEls[id];
+                const w = el ? el.offsetWidth || NW : NW;
+                const h = el ? el.offsetHeight || NH : NH;
+                tx = vw / 2 - (pos.x + w / 2) * scale;
+                ty = vh / 2 - (pos.y + h / 2) * scale;
+                applyTransform(true);
+            }
+
+            // ─── pan & zoom ───
+            let dragging = false,
+                startX = 0,
+                startY = 0,
+                startTx = 0,
+                startTy = 0;
+
+            document.addEventListener("mousedown", (e) => {
+                if (
+                    e.target.closest(".node") ||
+                    e.target.closest("#ui") ||
+                    e.target.closest("#zoom-btns") ||
+                    e.target.closest("#reset-btn")
+                )
+                    return;
+                dragging = true;
+                startX = e.clientX;
+                startY = e.clientY;
+                startTx = tx;
+                startTy = ty;
+                document.body.style.cursor = "grabbing";
+            });
+            document.addEventListener("mousemove", (e) => {
+                if (!dragging) return;
+                tx = startTx + (e.clientX - startX);
+                ty = startTy + (e.clientY - startY);
+                applyTransform();
+            });
+            document.addEventListener("mouseup", () => {
+                dragging = false;
+                document.body.style.cursor = "default";
+            });
+
+            document.addEventListener(
+                "wheel",
+                (e) => {
+                    e.preventDefault();
+                    const factor = e.deltaY < 0 ? 1.08 : 0.92;
+                    const cx = e.clientX,
+                        cy = e.clientY;
+                    const newScale = Math.max(
+                        0.15,
+                        Math.min(2.5, scale * factor),
+                    );
+                    tx = cx - (cx - tx) * (newScale / scale);
+                    ty = cy - (cy - ty) * (newScale / scale);
+                    scale = newScale;
+                    applyTransform();
+                },
+                { passive: false },
+            );
+
+            document.getElementById("zin").onclick = () => {
+                scale = Math.min(2.5, scale * 1.15);
+                applyTransform(true);
+            };
+            document.getElementById("zout").onclick = () => {
+                scale = Math.max(0.15, scale / 1.15);
+                applyTransform(true);
+            };
+            document.getElementById("reset-btn").onclick = () => {
+                tx = 0;
+                ty = 0;
+                scale = 0.55;
+                activeId = null;
+                Object.values(nodeEls).forEach((el) =>
+                    el.classList.remove("active", "dimmed"),
+                );
+                applyTransform(true);
+            };
+
+            // ─── search ───
+            document.getElementById("search").addEventListener("input", (e) => {
+                const q = e.target.value.toLowerCase().trim();
+                if (!q) {
+                    Object.values(nodeEls).forEach((el) =>
+                        el.classList.remove("dimmed"),
+                    );
+                    document.getElementById("count").textContent = "";
+                    activeId = null;
+                    drawEdges();
+                    return;
+                }
+                let hits = 0;
+                GENRES.forEach((g) => {
+                    const match =
+                        g.genre.toLowerCase().includes(q) ||
+                        g.artist.toLowerCase().includes(q) ||
+                        g.title.toLowerCase().includes(q) ||
+                        g.region.toLowerCase().includes(q);
+                    nodeEls[g.id].classList.toggle("dimmed", !match);
+                    if (match) hits++;
+                });
+                document.getElementById("count").textContent =
+                    `${hits} resultado${hits !== 1 ? "s" : ""}`;
+                drawEdges();
+            });
+
+            // touch support
+            let touches = {},
+                lastDist = 0;
+            document.addEventListener(
+                "touchstart",
+                (e) => {
+                    if (e.touches.length === 1) {
+                        dragging = true;
+                        startX = e.touches[0].clientX;
+                        startY = e.touches[0].clientY;
+                        startTx = tx;
+                        startTy = ty;
+                    } else if (e.touches.length === 2) {
+                        lastDist = Math.hypot(
+                            e.touches[0].clientX - e.touches[1].clientX,
+                            e.touches[0].clientY - e.touches[1].clientY,
+                        );
+                    }
+                },
+                { passive: true },
+            );
+            document.addEventListener(
+                "touchmove",
+                (e) => {
+                    e.preventDefault();
+                    if (e.touches.length === 1 && dragging) {
+                        tx = startTx + (e.touches[0].clientX - startX);
+                        ty = startTy + (e.touches[0].clientY - startY);
+                        applyTransform();
+                    } else if (e.touches.length === 2) {
+                        const dist = Math.hypot(
+                            e.touches[0].clientX - e.touches[1].clientX,
+                            e.touches[0].clientY - e.touches[1].clientY,
+                        );
+                        const factor = dist / lastDist;
+                        scale = Math.max(0.15, Math.min(2.5, scale * factor));
+                        lastDist = dist;
+                        applyTransform();
+                    }
+                },
+                { passive: false },
+            );
+            document.addEventListener("touchend", () => {
+                dragging = false;
+            });
+
+            // ─── initial render ───
+            applyTransform();
+            drawEdges();
+            window.addEventListener("resize", drawEdges);
+
+            // center on load
+            setTimeout(() => {
+                const vw = window.innerWidth,
+                    vh = window.innerHeight;
+                tx = vw * 0.05;
+                ty = 60;
+                scale = 0.52;
+                applyTransform(true);
+                drawEdges();
+                document.getElementById("count").textContent =
+                    `${GENRES.length} géneros`;
+            }, 100);
+        </script>
+    </body>
+</html>
