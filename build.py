@@ -1,142 +1,406 @@
 #!/usr/bin/env python3
 """
-Build genretree.html — Music Genre Tree visualization.
+Build genretree.html from mermaid diagram files in mermaid_diagrams/.
 
-Fetches genre data from musicgenretree.org/chart.html (cached locally as
-.chart_cache.html) and matches albums from a local SQLite DB.
+Each .md file contains one ```mermaid flowchart``` block.
+  Node syntax:  ID(Name. YYYY)  ID[Name. YYYY]  ID{Name. YYYY}
+  Edge syntax:  A --> B --> C
+  Subgraphs group related genres within a diagram.
 
 Usage:
-    python build.py                    # uses musthear.db in current dir
-    python build.py path/to/db.db      # explicit DB path
-    python build.py --no-db            # skip DB, only genre structure
+    python build.py           # scan mermaid_diagrams/, optionally load DB
+    python build.py --no-db   # skip database album data
 
 Output: genretree.html
 """
-import sys, sqlite3, json, re
+import sys, json, re
 from pathlib import Path
-import urllib.request
+from collections import defaultdict
 
-# ── config ──────────────────────────────────────────────────────────────────
-args     = sys.argv[1:]
-NO_DB    = "--no-db" in args
+# ── config ────────────────────────────────────────────────────────────────────
+args        = sys.argv[1:]
+NO_DB       = "--no-db" in args
 _DB_DEFAULT = Path.home() / "gits/pollo/rym_lastfm/db/must_hear_rym_new.db"
-DB_PATH  = Path(next((a for a in args if not a.startswith("-")), _DB_DEFAULT))
-CHART_URL   = "https://www.musicgenretree.org/chart.html"
-CHART_CACHE = Path(".chart_cache.html")
+DB_PATH     = Path(next((a for a in args if not a.startswith("-")), _DB_DEFAULT))
+MERMAID_DIR = Path("mermaid_diagrams")
 OUTPUT      = Path("genretree.html")
-NODE_W, NODE_H = 220, 100   # node dimensions in px
+NODE_W      = 210          # node width in px
+NODE_H      = 55           # approximate node height for edge anchors
 
-# Only keep genres from these 7 trees (matching the PNG URLs the user provided)
-TARGET_CATS = {
-    "ROCK",
-    "EXPERIMENTAL",
-    "ELECTRONIC DANCE",
-    "HIP HOP",
-    "RHYTHM & BLUES",
-    "JAZZ",
-    "WESTERN CLASSICAL",
-}
+# Left-to-right diagram arrangement; unknown diagrams appended alphabetically
+DIAGRAM_ORDER = ["classical", "jazz", "rnb", "hiphop", "rock", "edm", "experimental"]
 
 
-# ── fetch chart.html ─────────────────────────────────────────────────────────
-def fetch_chart() -> str:
-    if CHART_CACHE.exists():
-        print(f"Using cached {CHART_CACHE}")
-        return CHART_CACHE.read_text(encoding="utf-8", errors="replace")
-    print(f"Fetching {CHART_URL} …")
-    req = urllib.request.Request(CHART_URL, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        data = r.read()
-    CHART_CACHE.write_bytes(data)
-    return data.decode("utf-8", errors="replace")
+# ── mermaid parsing ───────────────────────────────────────────────────────────
+def parse_mermaid_label(text: str) -> "tuple[str, int | None]":
+    """
+    'Classical Marches.1700' → ('Classical Marches', 1700)
+    'Gregorian Cant. 750'   → ('Gregorian Cant',    750)
+    'Baroque Music'         → ('Baroque Music',      None)
+    """
+    text = text.strip()
+    m = re.search(r"[.\s](\d{3,4})\s*$", text)
+    if m:
+        return text[: m.start()].strip().rstrip("."), int(m.group(1))
+    return text, None
 
 
-# ── parse <area> tags ────────────────────────────────────────────────────────
-def parse_genres(html: str) -> list[dict]:
-    genres = []
-    for m in re.finditer(r"<area\b([^>]*?)/?>\s*", html, re.IGNORECASE | re.DOTALL):
-        raw = m.group(1)
+# Matches Mermaid node shapes: ID(…) ID[…] ID{…} ID((…)) ID([…])
+_NODE_RE = re.compile(
+    r"\b([A-Za-z][A-Za-z0-9_]*)\s*"
+    r"(\(\(|\(\[|\{|\(|\[)"
+    r"([^)\]}\n]+?)"
+    r"(\)\)|\]\)|\}|\)|\])"
+)
 
-        def attr(name: str) -> str:
-            am = re.search(rf'\b{name}=["\']([^"\']*)["\']', raw, re.IGNORECASE)
-            return am.group(1) if am else ""
 
-        title = attr("title")
-        if not title:
+def _parse_seg(part: str) -> "tuple[str|None, str|None, int|None, str|None]":
+    """One edge-chain segment → (id, name, year, shape) or (id, None, None, None)."""
+    part = part.strip()
+    nm = _NODE_RE.match(part)
+    if nm:
+        name, year = parse_mermaid_label(nm.group(3))
+        return nm.group(1), name, year, nm.group(2)
+    bare = re.match(r"^([A-Za-z][A-Za-z0-9_]*)\s*$", part)
+    if bare:
+        return bare.group(1), None, None, None
+    return None, None, None, None
+
+
+def parse_mermaid_file(path: Path) -> dict:
+    """
+    Returns {name, nodes, edges, subgraphs} or {} if no mermaid block found.
+      nodes     : {local_id → {id, name, year, shape, subgraph}}
+      edges     : [(from_id, to_id)]
+      subgraphs : {subgraph_name → [local_id, …]}
+    """
+    text = path.read_text(encoding="utf-8")
+    mm = re.search(r"```mermaid\s*([\s\S]*?)```", text)
+    if not mm:
+        return {}
+    content = mm.group(1)
+
+    nodes: dict[str, dict] = {}
+    edges: list[tuple] = []
+    subgraphs: dict[str, list] = {}
+    cur_sg = None
+
+    def _register(nid, name, year, shape):
+        if nid in nodes:
+            return
+        nodes[nid] = {"id": nid, "name": name or nid, "year": year,
+                      "shape": shape or "(", "subgraph": cur_sg}
+        if cur_sg is not None:
+            subgraphs.setdefault(cur_sg, [])
+            if nid not in subgraphs[cur_sg]:
+                subgraphs[cur_sg].append(nid)
+
+    for raw in content.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("%%"):
             continue
-        parts = [p.strip() for p in title.split("|")]
-        if len(parts) < 3:
+        if re.match(r"^(flowchart|graph)\b", line, re.I):
             continue
 
-        coords = attr("coords")
-        cx, cy = 0, 0
-        if coords:
-            nums = [int(v) for v in re.split(r"[,\s]+", coords) if re.match(r"-?\d+$", v)]
-            if len(nums) >= 4:
-                cx = (nums[0] + nums[2]) // 2
-                cy = (nums[1] + nums[3]) // 2
+        sg_m = re.match(r"^subgraph\s+(.*)", line)
+        if sg_m:
+            cur_sg = sg_m.group(1).strip().strip('"')
+            subgraphs.setdefault(cur_sg, [])
+            continue
+        if line == "end":
+            cur_sg = None
+            continue
 
-        seq_id = attr("id")
-        genres.append({
-            "id":      int(seq_id) if seq_id.isdigit() else len(genres),
-            "number":  parts[0],
-            "genre":   parts[1],
-            "rec":     parts[2],
-            "cat":     parts[3] if len(parts) > 3 else "",
-            "fam":     parts[4] if len(parts) > 4 else "",
-            "yt_href": attr("href"),
-            "cx": cx,
-            "cy": cy,
+        if "-->" in line or ".->" in line:
+            parts = re.split(r"\s*--[->\.]+\s*", line)
+            seg_ids = []
+            for part in parts:
+                nid, name, year, shape = _parse_seg(part)
+                if nid is None:
+                    continue
+                _register(nid, name, year, shape)
+                seg_ids.append(nid)
+            for i in range(len(seg_ids) - 1):
+                edges.append((seg_ids[i], seg_ids[i + 1]))
+        else:
+            nm = _NODE_RE.match(line)
+            if nm:
+                name, year = parse_mermaid_label(nm.group(3))
+                _register(nm.group(1), name, year, nm.group(2))
+
+    # Mark cross-refs: diamond {…} nodes with no outgoing edges
+    out_ids = {e[0] for e in edges}
+    for nid, n in nodes.items():
+        n["is_crossref"] = n["shape"] == "{" and nid not in out_ids
+
+    return {"name": path.stem, "nodes": nodes, "edges": edges, "subgraphs": subgraphs}
+
+
+def parse_mermaid_diagrams(dir_path: Path) -> "tuple[list[dict], dict]":
+    """
+    Parse all .md files.  Returns (genres_list, relations_dict) ready for
+    assign_positions() and build_js_data().
+    """
+    md_files = sorted(dir_path.glob("*.md"))
+    if not md_files:
+        print(f"No .md files found in {dir_path}")
+        return [], {}
+
+    file_map = {f.stem: f for f in md_files}
+    ordered = [file_map[n] for n in DIAGRAM_ORDER if n in file_map]
+    ordered += [f for f in sorted(md_files) if f.stem not in {p.stem for p in ordered}]
+
+    # Pass 1: parse
+    parsed = []
+    for path in ordered:
+        data = parse_mermaid_file(path)
+        if not data or not data.get("nodes"):
+            print(f"  skipped {path.name}")
+            continue
+        print(f"  {path.name}: {len(data['nodes'])} nodes, {len(data['edges'])} edges")
+        parsed.append(data)
+
+    # Pass 2: assign global IDs
+    all_genres: list[dict] = []
+    seq_id = 0
+    xref_map: dict[str, str] = {}   # diagram_name_lower → first global_num
+    diag_globals = []
+
+    for data in parsed:
+        diag_name = data["name"]
+        local_to_global: dict[str, str] = {}
+        first_num = None
+
+        # Subgraph insertion order → index for layout sorting
+        sg_order = list(data["subgraphs"].keys())
+        sg_idx   = {sg: i for i, sg in enumerate(sg_order)}
+
+        for local_id, n in data["nodes"].items():
+            global_num = f"{diag_name}_{local_id}"
+            local_to_global[local_id] = global_num
+            if first_num is None:
+                first_num = global_num
+
+            sg = n.get("subgraph") or ""
+            genre = {
+                "id":         seq_id,
+                "num":        global_num,
+                "number":     global_num,
+                "genre":      n["name"],
+                "year":       n["year"],
+                "start_year": n["year"],
+                "cat":        diag_name,
+                "fam":        sg,
+                "fam_idx":    sg_idx.get(sg, 999),
+                "shape":      n.get("shape", "("),
+                "is_crossref": n.get("is_crossref", False),
+                "recs":       [{"num": global_num, "rec": n["name"],
+                                "yt": "", "year": n["year"]}],
+                "all_nums":   [global_num],
+                "alb_list":   [],
+                "alb":        None,
+            }
+            all_genres.append(genre)
+            seq_id += 1
+
+        if first_num:
+            xref_map[diag_name.lower()] = first_num
+
+        diag_globals.append({
+            "name":  diag_name,
+            "local": local_to_global,
+            "first": first_num,
+            "edges": data["edges"],
+            "nodes": data["nodes"],
         })
 
-    print(f"Parsed {len(genres)} genres from chart.html")
-    return genres
+    # Pass 3: resolve edges (with cross-diagram resolution)
+    all_global_nums = {g["num"] for g in all_genres}
+    relations: dict[str, list] = {}
+
+    for dg in diag_globals:
+        local = dg["local"]
+        nodes = dg["nodes"]
+        for (from_id, to_id) in dg["edges"]:
+            from_num = local.get(from_id)
+            if not from_num:
+                continue
+            to_num = local.get(to_id)
+
+            # Cross-diagram: if target is a cross-ref node, try to find diagram root
+            if to_num and nodes.get(to_id, {}).get("is_crossref"):
+                node_name = nodes[to_id]["name"].lower()
+                for key, root_num in xref_map.items():
+                    if key in node_name or node_name in key:
+                        to_num = root_num
+                        break
+
+            if (from_num and to_num
+                    and from_num in all_global_nums
+                    and to_num in all_global_nums):
+                relations.setdefault(from_num, [])
+                if to_num not in relations[from_num]:
+                    relations[from_num].append(to_num)
+
+    total = sum(len(v) for v in relations.values())
+    print(f"Total: {len(all_genres)} nodes, {total} edges "
+          f"from {len(parsed)} diagram(s)")
+    return all_genres, relations
 
 
-# ── load albums from DB ──────────────────────────────────────────────────────
+# ── parse ejemplo.html as a data source ──────────────────────────────────────
+def parse_ejemplo(ej_path: Path = Path("ejemplo.html")) -> "tuple[list[dict], dict]":
+    """
+    Extract GENRES and rel_out from ejemplo.html.
+    Returns (genres_list, relations_dict) in the same format as
+    parse_mermaid_diagrams(), ready for assign_positions().
+    """
+    if not ej_path.exists():
+        print(f"{ej_path} not found")
+        return [], {}
+
+    html = ej_path.read_text(encoding="utf-8", errors="replace")
+
+    # ── extract raw GENRES array text via bracket counting ────────────────
+    marker = "const GENRES = ["
+    pos = html.find(marker)
+    if pos == -1:
+        print("GENRES array not found")
+        return [], {}
+
+    arr_start = pos + len(marker) - 1
+    depth = 0; arr_end = arr_start; in_str = esc = False
+    for i in range(arr_start, len(html)):
+        c = html[i]
+        if esc:              esc = False;  continue
+        if c == "\\" and in_str: esc = True; continue
+        if c == '"' and not esc: in_str = not in_str; continue
+        if in_str:           continue
+        if c == "[":         depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:  arr_end = i; break
+
+    src = html[arr_start + 1 : arr_end]
+
+    # ── split into individual JS object strings via brace counting ────────
+    obj_strs: list[str] = []
+    depth = 0; start = None; in_str = esc = False
+    for i, c in enumerate(src):
+        if esc:              esc = False;  continue
+        if c == "\\" and in_str: esc = True; continue
+        if c == '"' and not esc: in_str = not in_str; continue
+        if in_str:           continue
+        if c == "{":
+            if depth == 0:  start = i
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                obj_strs.append(src[start : i + 1])
+                start = None
+
+    def _str_attr(obj: str, name: str) -> str:
+        m = re.search(rf'\b{name}\s*:\s*"([^"]*)"', obj)
+        return m.group(1) if m else ""
+
+    def _list_attr(obj: str, name: str) -> list:
+        m = re.search(rf'\b{name}\s*:\s*(\[[\s\S]*?\])', obj)
+        return re.findall(r'"([^"]+)"', m.group(1)) if m else []
+
+    # ── parse each object ─────────────────────────────────────────────────
+    raw: list[dict] = []
+    for obj in obj_strs:
+        gid = _str_attr(obj, "id")
+        if not gid:
+            continue
+        raw.append({
+            "id":      gid,
+            "num":     _str_attr(obj, "num"),
+            "genre":   _str_attr(obj, "genre"),
+            "region":  _str_attr(obj, "region"),
+            "artist":  _str_attr(obj, "artist"),
+            "title":   _str_attr(obj, "title"),
+            "year":    _str_attr(obj, "year"),
+            "yt":      _str_attr(obj, "yt"),
+            "rel_out": _list_attr(obj, "rel_out"),
+        })
+
+    if not raw:
+        print("No genres parsed from ejemplo.html")
+        return [], {}
+
+    id_to_num = {g["id"]: g["num"] for g in raw}
+
+    # ── build genres list in our unified format ───────────────────────────
+    genres: list[dict] = []
+    relations: dict[str, list] = {}
+
+    for i, rg in enumerate(raw):
+        num      = rg["num"]
+        resolved = [id_to_num[rid] for rid in rg["rel_out"] if rid in id_to_num]
+
+        # Try to extract a numeric year for layout ordering
+        ys = rg["year"]
+        ym = re.search(r"(\d{3,4})\s*(?:AD|CE|BC)?$", ys) or re.search(r"\b(\d{3,4})\b", ys)
+        year_num = int(ym.group(1)) if ym else None
+
+        genres.append({
+            "id":         i,
+            "num":        num,
+            "number":     num,
+            "genre":      rg["genre"],
+            "year":       year_num,
+            "year_str":   ys,          # original string ("2.5M–5000 BC")
+            "start_year": year_num,
+            "cat":        rg["region"],
+            "fam":        "",          # ejemplo.html has no subgraphs
+            "fam_idx":    0,
+            "shape":      "(",
+            "is_crossref": False,
+            "recs":       [{"num": num,
+                            "rec": " — ".join(filter(None, [rg["artist"], rg["title"]])),
+                            "yt":  rg["yt"],
+                            "year": year_num}],
+            "all_nums":   [num],
+            "alb_list":   [],
+            "alb":        None,
+        })
+        if resolved:
+            relations[num] = resolved
+
+    total = sum(len(v) for v in relations.values())
+    print(f"Parsed {len(genres)} genres, {total} edges from {ej_path.name}")
+    return genres, relations
+
+
+# ── load albums from DB ───────────────────────────────────────────────────────
 def load_albums(db_path: Path) -> dict:
+    import sqlite3
     if not db_path.exists():
-        print(f"DB not found at {db_path}, skipping album data.")
+        print(f"DB not found at {db_path}, skipping.")
         return {}
-
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-
-    # Locate the MusicBrainz series collection
     cur.execute("SELECT id FROM collections WHERE source_url LIKE '%8902a102%' LIMIT 1")
     row = cur.fetchone()
     if not row:
-        cur.execute("""
-            SELECT id FROM collections
-            WHERE name LIKE '%genre%' OR name LIKE '%musthear%' OR name LIKE '%canonical%'
-            LIMIT 1
-        """)
-        row = cur.fetchone()
-    if not row:
-        print("Collection not found in DB — no album data will be embedded.")
         conn.close()
         return {}
-
     col_id = row[0]
     cur.execute("""
-        SELECT
-            ca.rank,
-            al.name         AS album_name,
-            al.year,
-            al.youtube_url, al.spotify_url, al.lastfm_url,
-            al.musicbrainz_url, al.discogs_url, al.bandcamp_url,
-            al.rateyourmusic_url, al.allmusic_url,
-            al.cover_url,
-            al.scaruffi_rating, al.aoty_user_score, al.metacritic_score,
-            ar.name         AS artist_name,
-            ar.country,
-            ar.img_url      AS artist_img,
-            ar.lastfm_url   AS artist_lastfm,
-            ar.musicbrainz_url AS artist_mb,
-            ar.wikipedia_url   AS artist_wiki,
-            SUBSTR(am.desc_lfm_album,  1, 600)  AS desc_album,
-            SUBSTR(am.desc_lfm_artist, 1, 400)  AS desc_artist
+        SELECT ca.rank,
+               al.name AS album_name, al.year,
+               al.youtube_url, al.spotify_url, al.lastfm_url,
+               al.musicbrainz_url, al.discogs_url, al.bandcamp_url,
+               al.rateyourmusic_url, al.allmusic_url,
+               al.cover_url, al.scaruffi_rating, al.aoty_user_score, al.metacritic_score,
+               ar.name AS artist_name, ar.country, ar.img_url AS artist_img,
+               ar.lastfm_url AS artist_lastfm, ar.musicbrainz_url AS artist_mb,
+               ar.wikipedia_url AS artist_wiki,
+               SUBSTR(am.desc_lfm_album,  1, 600) AS desc_album,
+               SUBSTR(am.desc_lfm_artist, 1, 400) AS desc_artist
         FROM collection_albums ca
         JOIN albums  al ON ca.album_id  = al.id
         JOIN artists ar ON al.artist_id = ar.id
@@ -144,345 +408,232 @@ def load_albums(db_path: Path) -> dict:
         WHERE ca.collection_id = ?
         ORDER BY ca.rank
     """, (col_id,))
-
     albums = {}
     for r in cur.fetchall():
         d = {k: r[k] for k in r.keys() if r[k] is not None and r[k] != ""}
         albums[r["rank"]] = d
-
     conn.close()
-    print(f"Loaded {len(albums)} albums from DB (collection id={col_id})")
+    print(f"Loaded {len(albums)} albums (collection id={col_id})")
     return albums
 
 
-# ── year extraction ───────────────────────────────────────────────────────────
-def extract_year(rec: str) -> "int | None":
-    m = re.search(r"[(~]?(\d{4})\b", rec)
-    return int(m.group(1)) if m else None
-
-
-# ── deduplicate genres sharing the same name ──────────────────────────────────
-def deduplicate_genres(genres: list[dict]) -> list[dict]:
+# ── layout: two-level (subgraph blocks → nodes inside) ───────────────────────
+def assign_positions(genres: list[dict], relations: dict) -> list[dict]:
     """
-    Multiple <area> entries in chart.html can share the same genre name —
-    each represents a different representative recording.  Merge them into
-    one node keyed by the lowest genre number.  The merged node carries:
-      recs       — list[{num, rec, yt, year}]  (all representative recordings)
-      all_nums   — list[str]                   (every original genre number)
-      start_year — int | None                  (earliest year across recs)
+    1. Build a subgraph-level DAG and assign each subgraph a (col, row) slot
+       using topological levels, so subgraph blocks never overlap.
+    2. Within each block, sort nodes by topological order and lay them out
+       in a single column so intra-block arrows flow top→bottom.
     """
-    from collections import defaultdict
+    from collections import deque
 
-    by_key: dict[tuple, list] = defaultdict(list)
-    for g in genres:
-        key = (g["cat"], g["genre"].strip().lower())
-        by_key[key].append(g)
-
-    result = []
-    for _key, group in by_key.items():
-        group.sort(key=lambda g: (int(g["number"].strip())
-                                  if g["number"].strip().isdigit() else 9999))
-        canonical = group[0].copy()
-        years, recs = [], []
-        for gg in group:
-            yr = extract_year(gg["rec"])
-            recs.append({"num": gg["number"], "rec": gg["rec"],
-                         "yt": gg["yt_href"], "year": yr})
-            if yr:
-                years.append(yr)
-        canonical["recs"]       = recs
-        canonical["all_nums"]   = [gg["number"] for gg in group]
-        canonical["start_year"] = min(years) if years else None
-        result.append(canonical)
-
-    result.sort(key=lambda g: (int(g["number"].strip())
-                               if g["number"].strip().isdigit() else 9999))
-    print(f"Deduplicated: {len(genres)} → {len(result)} unique genres")
-    return result
-
-
-# ── parse rel_out from ejemplo.html ──────────────────────────────────────────
-def parse_relations(ej_path: Path = Path("ejemplo.html")) -> dict:
-    """
-    Extract genre relationships from ejemplo.html.
-    Returns: {num_str: [num_str, ...]}  (4-digit genre numbers)
-
-    Uses bracket counting to find the full GENRES array (regex would stop
-    at the first ]; inside the array), then brace counting for each object.
-    """
-    if not ej_path.exists():
-        print("ejemplo.html not found — no edge data")
-        return {}
-
-    html = ej_path.read_text(encoding="utf-8", errors="replace")
-
-    # Locate 'const GENRES = [' and find matching closing bracket
-    marker = "const GENRES = ["
-    pos = html.find(marker)
-    if pos == -1:
-        print("GENRES array not found in ejemplo.html")
-        return {}
-
-    arr_start = pos + len(marker) - 1   # points to the opening '['
-    depth = 0
-    arr_end = arr_start
-    in_str, esc = False, False
-    for i in range(arr_start, len(html)):
-        c = html[i]
-        if esc:
-            esc = False
-            continue
-        if c == "\\" and in_str:
-            esc = True
-            continue
-        if c == '"' and not esc:
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if c == "[":
-            depth += 1
-        elif c == "]":
-            depth -= 1
-            if depth == 0:
-                arr_end = i
-                break
-
-    src = html[arr_start + 1 : arr_end]   # content between [ and ]
-
-    # Split src into individual genre objects using brace counting
-    objs: list[str] = []
-    depth = 0
-    start = None
-    in_str = esc = False
-    for i, c in enumerate(src):
-        if esc:
-            esc = False
-            continue
-        if c == "\\" and in_str:
-            esc = True
-            continue
-        if c == '"' and not esc:
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if c == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0 and start is not None:
-                objs.append(src[start : i + 1])
-                start = None
-
-    # Phase 1: build id → num mapping from the extracted src
-    id_to_num: dict[str, str] = {}
-    for m in re.finditer(r'\bid:\s*"([^"]+)"[^}]*?\bnum:\s*"(\d+)"', src, re.DOTALL):
-        id_to_num[m.group(1)] = m.group(2)
-
-    # Phase 2: extract (id, rel_out) pairs.
-    # Each genre object has id: before rel_out: — non-greedy match stays within one object.
-    result: dict[str, list[str]] = {}
-    for m in re.finditer(
-        r'\bid:\s*"([^"]+)"[^}]*?\brel_out:\s*\[([\s\S]*?)\]',
-        src,
-    ):
-        gid     = m.group(1)
-        rel_str = m.group(2)
-        num     = id_to_num.get(gid)
-        if not num:
-            continue
-        rel_ids  = re.findall(r'"([\w]+)"', rel_str)
-        resolved = [id_to_num[r] for r in rel_ids if r in id_to_num]
-        if resolved:
-            result[num] = resolved
-
-    total = sum(len(v) for v in result.values())
-    print(f"Parsed {len(id_to_num)} genres, {len(result)} with edges ({total} total) from ejemplo.html")
-    return result
-
-
-# ── infer connections from genre numbering ───────────────────────────────────
-def infer_relations(genres: list[dict]) -> dict:
-    """
-    Build approximate genre tree connections from the sequential numbering.
-
-    Within each category the genres are listed in chronological/evolutionary
-    order. We group them into "decade clusters" (same tens digit in the
-    4-digit number). Within each cluster the first genre is the root and all
-    others are its direct children. Cluster roots link sequentially so the
-    overall category forms a chain of clusters.
-
-    Between categories we follow the broad historical evolution:
-    Classical → Jazz → R&B → Hip Hop → Rock → EDM → Experimental
-    """
-    from collections import defaultdict
-
-    CAT_EVOLUTION = [
-        "WESTERN CLASSICAL",
-        "JAZZ",
-        "RHYTHM & BLUES",
-        "HIP HOP",
-        "ROCK",
-        "ELECTRONIC DANCE",
-        "EXPERIMENTAL",
-    ]
-
-    by_cat: dict[str, list[tuple[int, str]]] = defaultdict(list)
-    for g in genres:
-        try:
-            by_cat[g["cat"]].append((int(g["number"].strip()), g["number"].strip()))
-        except (ValueError, AttributeError):
-            pass
-    for cat in by_cat:
-        by_cat[cat].sort()
-
-    result: dict[str, list[str]] = {}
-
-    # Within each category — decade-cluster tree
-    for cat, num_pairs in by_cat.items():
-        if not num_pairs:
-            continue
-
-        decades: dict[int, list[tuple[int, str]]] = {}
-        for int_n, str_n in num_pairs:
-            dk = int_n // 10
-            decades.setdefault(dk, []).append((int_n, str_n))
-
-        sorted_dks  = sorted(decades.keys())
-        decade_roots: dict[int, str] = {}
-
-        for dk in sorted_dks:
-            members = decades[dk]
-            root_str = members[0][1]
-            decade_roots[dk] = root_str
-            # All non-root members are children of the decade root
-            for _, str_n in members[1:]:
-                result.setdefault(root_str, []).append(str_n)
-
-        # Chain the decade roots sequentially
-        for i in range(len(sorted_dks) - 1):
-            root_from = decade_roots[sorted_dks[i]]
-            root_to   = decade_roots[sorted_dks[i + 1]]
-            result.setdefault(root_from, []).append(root_to)
-
-    # Between categories — historical evolution
-    for i in range(len(CAT_EVOLUTION) - 1):
-        cat_from, cat_to = CAT_EVOLUTION[i], CAT_EVOLUTION[i + 1]
-        if cat_from in by_cat and cat_to in by_cat:
-            root_from = by_cat[cat_from][0][1]
-            root_to   = by_cat[cat_to][0][1]
-            result.setdefault(root_from, []).append(root_to)
-
-    total = sum(len(v) for v in result.values())
-    print(f"Inferred {total} edges from decade-cluster structure + category evolution")
-    return result
-
-
-# ── match genres → albums ────────────────────────────────────────────────────
-def match(genres: list[dict], albums: dict) -> list[dict]:
-    """
-    Match each (possibly deduplicated) genre to all its DB albums.
-    Uses every number in g["all_nums"] so merged genres collect every album.
-    """
-    matched = 0
-    for g in genres:
-        all_nums = g.get("all_nums", [g["number"]])
-        alb_list = []
-        for num_str in all_nums:
-            try:
-                k = int(num_str.strip())
-                if k in albums:
-                    alb_list.append(albums[k])
-            except ValueError:
-                pass
-        g["alb_list"] = alb_list
-        g["alb"] = alb_list[0] if alb_list else None   # kept for backwards compat
-        if alb_list:
-            matched += 1
-    print(f"Matched {matched}/{len(genres)} genres by genre number")
-    return genres
-
-
-# ── cluster layout (grouped by category, like ejemplo.html regions) ──────────
-# Preferred display order of categories
-CAT_ORDER = [
-    "WESTERN CLASSICAL",
-    "JAZZ",
-    "RHYTHM & BLUES",
-    "ROCK",
-    "HIP HOP",
-    "ELECTRONIC DANCE",
-    "EXPERIMENTAL",
-]
-
-def assign_positions(genres: list[dict]) -> list[dict]:
-    from math import ceil
-    from collections import defaultdict
-
-    STEP_X      = NODE_W + 40   # horizontal step between nodes within cluster
-    STEP_Y      = NODE_H + 30   # vertical step between nodes within cluster
-    COLS        = 6             # max columns per cluster
-    CAT_GAP_X   = 90            # horizontal gap between clusters
-    CAT_GAP_Y   = 110           # vertical gap between cluster rows
-    INNER_PAD   = 20            # padding inside cluster
-    LABEL_H     = 24            # height of category label above cluster
-    MAX_ROW_W   = 14000         # wrap clusters to next row beyond this
-    ORIGIN      = 300           # starting offset
+    # ── tunables ─────────────────────────────────────────────────────────────
+    N_STEP_X  = NODE_W + 24    # node → node horiz spacing inside a block
+    N_STEP_Y  = NODE_H + 44    # node → node vert  spacing inside a block
+    N_COLS    = 2              # max columns of nodes inside one subgraph block
+    BLK_PAD   = 22             # padding around nodes inside a block
+    BLK_LBL   = 20             # height of the subgraph label inside the block
+    BLK_GAP_X = 70             # horizontal gap between blocks at the same level
+    BLK_GAP_Y = 80             # vertical gap between levels of blocks
+    DIAG_GAP  = 250            # horizontal gap between whole diagrams
+    ORIGIN_X  = 300
+    ORIGIN_Y  = 300
 
     by_cat: dict[str, list] = defaultdict(list)
     for g in genres:
         by_cat[g["cat"]].append(g)
 
-    # Ordered list of present categories
-    cats = [c for c in CAT_ORDER if c in by_cat]
-    for c in sorted(by_cat.keys()):
-        if c not in cats:
-            cats.append(c)
+    cats = [c for c in DIAGRAM_ORDER if c in by_cat]
+    cats += [c for c in sorted(by_cat) if c not in cats]
 
-    # Cluster width/height
-    def cluster_dims(count: int) -> tuple[int, int]:
-        cols = min(COLS, count)
-        rows = ceil(count / cols) if cols else 0
-        w = cols * STEP_X + 2 * INNER_PAD
-        h = rows * STEP_Y + 2 * INNER_PAD + LABEL_H
-        return w, h
-
-    cur_x, cur_y = ORIGIN, ORIGIN
-    row_h = 0
+    cur_diag_x = ORIGIN_X
 
     for cat in cats:
         cat_genres = by_cat[cat]
-        if not cat_genres:
-            continue
-        cw, ch = cluster_dims(len(cat_genres))
+        cat_nums   = {g["num"] for g in cat_genres}
+        by_num_c   = {g["num"]: g for g in cat_genres}
 
-        # Wrap to next row if cluster overflows current row
-        if cur_x + cw > MAX_ROW_W + ORIGIN and cur_x > ORIGIN:
-            cur_x = ORIGIN
-            cur_y += row_h + CAT_GAP_Y
-            row_h = 0
+        # ── group genres by subgraph ──────────────────────────────────────
+        by_sg: dict[str, list] = defaultdict(list)
+        for g in cat_genres:
+            by_sg[g["fam"]].append(g)
+        all_sgs = list(by_sg.keys())
 
-        # Keep the original chart.html Y-order within each category
-        # (genres with lower cy first)
-        cat_genres.sort(key=lambda g: (g["cy"], g["cx"]))
+        # ── inter-subgraph adjacency ──────────────────────────────────────
+        sg_ch:  dict[str, set] = defaultdict(set)   # sg → child sgs
+        sg_par: dict[str, set] = defaultdict(set)   # sg → parent sgs
+        for g in cat_genres:
+            for to_num in relations.get(g["num"], []):
+                if to_num not in cat_nums:
+                    continue
+                to_sg = by_num_c[to_num]["fam"]
+                if to_sg != g["fam"]:
+                    sg_ch[g["fam"]].add(to_sg)
+                    sg_par[to_sg].add(g["fam"])
 
-        cols = min(COLS, len(cat_genres))
-        for i, g in enumerate(cat_genres):
-            col = i % cols
-            row = i // cols
-            g["x"] = cur_x + INNER_PAD + col * STEP_X
-            g["y"] = cur_y + INNER_PAD + LABEL_H + row * STEP_Y
+        # ── topological level for each subgraph ───────────────────────────
+        sg_in_deg = {sg: len(sg_par[sg]) for sg in all_sgs}
+        sg_lv: dict[str, int] = {}
+        q: deque = deque()
+        for sg in all_sgs:
+            if sg_in_deg[sg] == 0:
+                sg_lv[sg] = 0
+                q.append(sg)
+        if not q:
+            sg_lv[all_sgs[0]] = 0
+            q.append(all_sgs[0])
+        while q:
+            sg = q.popleft()
+            for ch in sg_ch[sg]:
+                new_lv = sg_lv[sg] + 1
+                if ch not in sg_lv or sg_lv[ch] < new_lv:
+                    sg_lv[ch] = new_lv
+                    q.append(ch)
+        for sg in all_sgs:
+            if sg not in sg_lv:
+                sg_lv[sg] = 0
 
-        row_h = max(row_h, ch)
-        cur_x += cw + CAT_GAP_X
+        # ── pre-compute per-subgraph level structure ──────────────────────
+        # (needed to get accurate block dimensions before block placement)
+        sg_level_data: dict[str, dict] = {}  # sg → {nodes_by_level, max_wide, num_levels}
+
+        for sg, sg_nodes in by_sg.items():
+            sg_nums = {g["num"] for g in sg_nodes}
+            sg_ch_l: dict[str, list] = defaultdict(list)
+            sg_in_l: dict[str, int]  = defaultdict(int)
+            for g in sg_nodes:
+                for to in relations.get(g["num"], []):
+                    if to in sg_nums:
+                        sg_ch_l[g["num"]].append(to)
+                        sg_in_l[to] += 1
+
+            roots = [g["num"] for g in sg_nodes if sg_in_l[g["num"]] == 0]
+            if not roots:
+                roots = [sg_nodes[0]["num"]]
+
+            # BFS max-depth level assignment
+            lv_map: dict[str, int] = {}
+            dq: deque = deque()
+            for r in roots:
+                lv_map[r] = 0
+                dq.append(r)
+            while dq:
+                num = dq.popleft()
+                for ch in sg_ch_l[num]:
+                    new_lv = lv_map[num] + 1
+                    if ch not in lv_map or lv_map[ch] < new_lv:
+                        lv_map[ch] = new_lv
+                        dq.append(ch)
+            for g in sg_nodes:
+                if g["num"] not in lv_map:
+                    lv_map[g["num"]] = 0
+
+            by_lv_l: dict[int, list] = defaultdict(list)
+            for g in sg_nodes:
+                by_lv_l[lv_map[g["num"]]].append(g)
+
+            max_wide  = max(len(v) for v in by_lv_l.values())
+            num_levels = max(by_lv_l.keys()) + 1
+            sg_level_data[sg] = {
+                "lv_map":     lv_map,
+                "by_lv":      by_lv_l,
+                "max_wide":   max_wide,
+                "num_levels": num_levels,
+                "ch":         sg_ch_l,
+            }
+
+        # ── compute block pixel dimensions using actual level structure ────
+        def blk_size(sg: str) -> tuple:
+            ld   = sg_level_data[sg]
+            cols = ld["max_wide"]   # no cap — block width = widest level
+            w    = cols * N_STEP_X - (N_STEP_X - NODE_W) + 2 * BLK_PAD
+            h    = ld["num_levels"] * N_STEP_Y - (N_STEP_Y - NODE_H) + 2 * BLK_PAD + BLK_LBL
+            return w, h
+
+        # ── group subgraphs by level ──────────────────────────────────────
+        by_lv: dict[int, list] = defaultdict(list)
+        for sg in all_sgs:
+            by_lv[sg_lv[sg]].append(sg)
+
+        # Sort subgraphs within each level by fam_idx (mermaid file order)
+        sg_fam_idx = {}
+        for g in cat_genres:
+            sg_fam_idx[g["fam"]] = min(sg_fam_idx.get(g["fam"], 999),
+                                       g.get("fam_idx", 999))
+        for lv in by_lv:
+            by_lv[lv].sort(key=lambda sg: sg_fam_idx.get(sg, 999))
+
+        # ── compute cumulative y per level (based on tallest block) ───────
+        lv_y: dict[int, float] = {}
+        cur_y = ORIGIN_Y
+        for lv in sorted(by_lv.keys()):
+            lv_y[lv] = cur_y
+            max_h = max(blk_size(sg)[1] for sg in by_lv[lv])
+            cur_y += max_h + BLK_GAP_Y
+
+        # ── assign block x positions per level ────────────────────────────
+        sg_blk_x: dict[str, float] = {}   # left edge of each subgraph block
+        diag_total_w = 0
+
+        for lv in sorted(by_lv.keys()):
+            sgs_at_lv = by_lv[lv]
+            # Sort by parent block x for less crossing
+            if lv > 0:
+                sgs_at_lv.sort(key=lambda sg: (
+                    sum(sg_blk_x.get(p, 0) + blk_size(p)[0]/2
+                        for p in sg_par[sg]) /
+                    max(len(sg_par[sg]), 1)
+                ))
+            total_w = (sum(blk_size(sg)[0] for sg in sgs_at_lv)
+                       + (len(sgs_at_lv) - 1) * BLK_GAP_X)
+            diag_total_w = max(diag_total_w, total_w)
+
+        # Second pass: lay out x centering each level over diag_total_w
+        for lv in sorted(by_lv.keys()):
+            sgs_at_lv = by_lv[lv]
+            total_w = (sum(blk_size(sg)[0] for sg in sgs_at_lv)
+                       + (len(sgs_at_lv) - 1) * BLK_GAP_X)
+            bx = cur_diag_x + (diag_total_w - total_w) / 2
+            for sg in sgs_at_lv:
+                sg_blk_x[sg] = bx
+                bx += blk_size(sg)[0] + BLK_GAP_X
+
+        # ── place nodes inside each block (row = depth level) ────────────
+        for sg, sg_nodes in by_sg.items():
+            bx       = sg_blk_x.get(sg, cur_diag_x)
+            by_start = lv_y[sg_lv[sg]]
+            bw, _    = blk_size(sg)
+            ld       = sg_level_data[sg]
+            cols     = ld["max_wide"]   # matches blk_size → no overflow
+            node_area_w = cols * N_STEP_X - (N_STEP_X - NODE_W)
+
+            # Sort nodes within each level by avg parent x (reduces crossings)
+            pos_x: dict[str, float] = {}
+            for lv in sorted(ld["by_lv"].keys()):
+                lv_nodes = ld["by_lv"][lv]
+                if lv > 0:
+                    lv_nodes.sort(key=lambda g: (
+                        sum(pos_x.get(p, 0)
+                            for p in ld["ch"]            # ch maps parent→[children]
+                            if g["num"] in ld["ch"][p])  # find parents of g
+                        or pos_x.get(g["num"], 0)
+                    ))
+                n = len(lv_nodes)
+                row_w = (n - 1) * N_STEP_X + NODE_W
+                start_x = bx + BLK_PAD + (node_area_w - row_w) / 2
+                for i, node_g in enumerate(lv_nodes):
+                    x = start_x + i * N_STEP_X
+                    y = by_start + BLK_LBL + BLK_PAD + lv * N_STEP_Y
+                    node_g["x"] = x
+                    node_g["y"] = y
+                    pos_x[node_g["num"]] = x
+
+        cur_diag_x += diag_total_w + DIAG_GAP
 
     return genres
 
 
-# ── build JS data array ───────────────────────────────────────────────────────
+# ── build JS data ─────────────────────────────────────────────────────────────
 _ALB_FIELDS = [
     "album_name", "year", "artist_name", "country",
     "cover_url", "artist_img",
@@ -501,23 +652,23 @@ def _serialize_alb(a: dict) -> dict:
 def build_js_data(genres: list[dict], relations: dict) -> str:
     out = []
     for g in genres:
-        rel = relations.get(g["number"], [])
         entry = {
             "id":         g["id"],
-            "num":        g["number"],
+            "num":        g["num"],
             "genre":      g["genre"],
+            "year":       g.get("year"),
+            "year_str":   g.get("year_str", ""),
+            "start_year": g.get("start_year"),
             "cat":        g["cat"],
-            "fam":        g["fam"],
+            "fam":        g.get("fam", ""),
+            "fam_idx":    g.get("fam_idx", 999),
             "x":          g["x"],
             "y":          g["y"],
-            "rel_out":    rel,
-            "start_year": g.get("start_year"),
-            "recs":       g.get("recs", [{"num": g["number"], "rec": g.get("rec",""),
-                                          "yt": g.get("yt_href",""), "year": None}]),
+            "rel_out":    relations.get(g["num"], []),
+            "recs":       g.get("recs", []),
         }
-        alb_list = g.get("alb_list", [])
-        if alb_list:
-            entry["alb_list"] = [_serialize_alb(a) for a in alb_list]
+        if g.get("alb_list"):
+            entry["alb_list"] = [_serialize_alb(a) for a in g["alb_list"]]
         out.append(entry)
     return json.dumps(out, ensure_ascii=False)
 
@@ -553,21 +704,19 @@ body::before{{content:"";position:fixed;inset:0;
 /* ── node ── */
 .node{{position:absolute;width:{nw}px;background:var(--bg2);
   border:1px solid var(--border);border-top-width:2px;border-radius:2px;
-  cursor:pointer;transition:border-color .2s,box-shadow .2s,opacity .15s;user-select:none}}
+  cursor:pointer;transition:border-color .2s,box-shadow .2s,opacity .15s;
+  user-select:none;padding:7px 26px 7px 9px}}
 .node:hover{{border-color:var(--border-active);z-index:10}}
 .node.active{{border-color:var(--accent);
   box-shadow:0 0 0 1px var(--accent),0 8px 40px rgba(200,169,110,.2);z-index:20}}
-.node.dimmed{{opacity:.12;pointer-events:none}}
-.node-header{{padding:8px 10px 6px;border-bottom:1px solid var(--border);
-  display:flex;align-items:flex-start;gap:6px}}
-.node-num{{font-size:9px;font-family:var(--font-mono);color:var(--text3);
-  letter-spacing:.04em;padding-top:1px;flex-shrink:0}}
-.node-genre{{font-size:11px;font-weight:700;color:var(--accent);
-  letter-spacing:.02em;text-transform:uppercase;line-height:1.3}}
-.node-family{{font-size:9px;color:var(--text3);margin-top:1px}}
-.node-body{{padding:5px 10px 7px}}
-.node-year{{font-size:11px;color:var(--text2);font-family:var(--font-mono);letter-spacing:.04em}}
-.node-plus{{position:absolute;top:6px;right:6px;width:18px;height:18px;
+.node.dimmed{{opacity:.1;pointer-events:none}}
+.node-title{{font-size:11px;font-weight:700;color:var(--accent);
+  letter-spacing:.02em;text-transform:uppercase;line-height:1.35}}
+.node-title .yr{{color:var(--text3);font-weight:400;font-family:var(--font-mono);
+  font-size:10px;margin-right:4px}}
+.node-sub{{font-size:9px;color:var(--text3);margin-top:2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.node-plus{{position:absolute;top:6px;right:6px;width:17px;height:17px;
   background:transparent;border:1px solid var(--border);border-radius:50%;
   color:var(--text3);font-size:13px;line-height:1;display:flex;
   align-items:center;justify-content:center;cursor:pointer;
@@ -586,39 +735,17 @@ body::before{{content:"";position:fixed;inset:0;
   font-family:var(--font-mono);font-size:11px;padding:3px 8px;
   cursor:pointer;transition:border-color .15s,color .15s}}
 #panel-close:hover{{border-color:var(--accent);color:var(--accent)}}
-#panel-num{{font-size:9px;font-family:var(--font-mono);color:var(--text3)}}
+#panel-year{{font-size:11px;font-family:var(--font-mono);color:var(--text3)}}
 #panel-genre{{font-family:var(--font-serif);font-size:22px;
-  font-style:italic;color:var(--text);margin:4px 0 2px;line-height:1.2}}
+  font-style:italic;color:var(--text);margin:3px 0 2px;line-height:1.2}}
 #panel-cat{{font-size:10px;color:var(--text3)}}
 #panel-body{{flex:1;overflow-y:auto;padding:12px 16px}}
 #panel-body::-webkit-scrollbar{{width:4px}}
 #panel-body::-webkit-scrollbar-thumb{{background:var(--border)}}
-.panel-covers{{display:flex;gap:8px;margin-bottom:12px}}
-.panel-cover{{width:100px;height:100px;object-fit:cover;border-radius:2px;
-  border:1px solid var(--border)}}
-.panel-artist-img{{width:70px;height:70px;object-fit:cover;border-radius:50%;
-  border:1px solid var(--border);align-self:flex-end}}
-.panel-section{{margin-bottom:12px}}
+.panel-section{{margin-bottom:14px}}
 .panel-label{{font-size:8px;color:var(--text3);letter-spacing:.1em;
-  text-transform:uppercase;margin-bottom:4px}}
-.panel-album-name{{font-family:var(--font-serif);font-style:italic;
-  font-size:14px;color:var(--text);line-height:1.3}}
-.panel-artist{{font-size:11px;color:var(--text2);margin-top:2px}}
-.panel-meta{{font-size:9px;color:var(--text3);margin-top:2px;letter-spacing:.04em}}
-.panel-links{{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}}
-.panel-link{{font-size:9px;letter-spacing:.05em;padding:3px 8px;
-  border:1px solid var(--border);border-radius:20px;color:var(--text2);
-  text-decoration:none;transition:border-color .15s,color .15s;white-space:nowrap}}
-.panel-link:hover{{border-color:var(--accent);color:var(--accent)}}
-.panel-yt-wrap{{position:relative;padding-top:56.25%;background:#000;
-  border-radius:2px;overflow:hidden;margin-bottom:10px}}
-.panel-yt-wrap iframe{{position:absolute;inset:0;width:100%;height:100%;border:0}}
-.panel-desc{{font-size:10px;color:var(--text2);line-height:1.6}}
-.panel-scores{{display:flex;gap:10px;flex-wrap:wrap}}
-.panel-score{{text-align:center}}
-.panel-score-val{{font-size:14px;font-weight:700;color:var(--accent)}}
-.panel-score-lbl{{font-size:8px;color:var(--text3);letter-spacing:.06em}}
-.panel-rec-item{{padding:7px 0;border-bottom:1px solid var(--border);display:flex;
+  text-transform:uppercase;margin-bottom:5px}}
+.panel-rec-item{{padding:6px 0;border-bottom:1px solid var(--border);display:flex;
   flex-direction:column;gap:4px}}
 .panel-rec-item:last-child{{border-bottom:none}}
 .panel-rec-text{{font-family:var(--font-serif);font-style:italic;
@@ -627,8 +754,10 @@ body::before{{content:"";position:fixed;inset:0;
   border:1px solid var(--border);border-radius:20px;color:var(--text2);
   background:none;cursor:pointer;align-self:flex-start;
   transition:border-color .15s,color .15s;font-family:var(--font)}}
-.panel-rec-yt:hover{{border-color:#e00;color:#e00}}
-.panel-rec-yt.active{{border-color:#e00;color:#e00}}
+.panel-rec-yt:hover,.panel-rec-yt.active{{border-color:#e00;color:#e00}}
+.panel-yt-wrap{{position:relative;padding-top:56.25%;background:#000;
+  border-radius:2px;overflow:hidden;margin-bottom:10px}}
+.panel-yt-wrap iframe{{position:absolute;inset:0;width:100%;height:100%;border:0}}
 .panel-alb-card{{padding:8px 0;border-bottom:1px solid var(--border);display:flex;gap:10px}}
 .panel-alb-card:last-child{{border-bottom:none}}
 .panel-alb-cover{{width:64px;height:64px;object-fit:cover;border-radius:2px;
@@ -638,6 +767,16 @@ body::before{{content:"";position:fixed;inset:0;
   color:var(--text);line-height:1.3}}
 .panel-alb-artist{{font-size:11px;color:var(--text2);margin-top:2px}}
 .panel-alb-meta{{font-size:9px;color:var(--text3);margin-top:2px;letter-spacing:.04em}}
+.panel-links{{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}}
+.panel-link{{font-size:9px;letter-spacing:.05em;padding:3px 8px;
+  border:1px solid var(--border);border-radius:20px;color:var(--text2);
+  text-decoration:none;transition:border-color .15s,color .15s;white-space:nowrap}}
+.panel-link:hover{{border-color:var(--accent);color:var(--accent)}}
+.panel-desc{{font-size:10px;color:var(--text2);line-height:1.6;margin-top:6px}}
+.panel-scores{{display:flex;gap:10px;flex-wrap:wrap}}
+.panel-score{{text-align:center}}
+.panel-score-val{{font-size:14px;font-weight:700;color:var(--accent)}}
+.panel-score-lbl{{font-size:8px;color:var(--text3);letter-spacing:.06em}}
 
 /* ── UI chrome ── */
 #ui{{position:fixed;top:0;left:0;right:0;z-index:100;pointer-events:none}}
@@ -678,10 +817,10 @@ body::before{{content:"";position:fixed;inset:0;
   <div id="topbar">
     <div id="title-block">
       <h1>Music Genre Tree</h1>
-      <p>musicgenretree.org · {count} géneros</p>
+      <p>{subtitle}</p>
     </div>
     <div id="search-wrap">
-      <input id="search" type="text" placeholder="Buscar género, artista…" autocomplete="off">
+      <input id="search" type="text" placeholder="Buscar género, año, subgénero…" autocomplete="off">
       <span id="count"></span>
     </div>
   </div>
@@ -705,7 +844,7 @@ body::before{{content:"";position:fixed;inset:0;
 <div id="info-panel">
   <div id="panel-head">
     <button id="panel-close">✕ cerrar</button>
-    <div id="panel-num"></div>
+    <div id="panel-year"></div>
     <div id="panel-genre"></div>
     <div id="panel-cat"></div>
   </div>
@@ -715,8 +854,8 @@ body::before{{content:"";position:fixed;inset:0;
         <iframe id="p-yt" allowfullscreen allow="autoplay;encrypted-media"></iframe>
       </div>
     </div>
-    <div class="panel-section" id="p-recs-section">
-      <div class="panel-label">Grabaciones representativas (musicgenretree.org)</div>
+    <div class="panel-section" id="p-recs-section" style="display:none">
+      <div class="panel-label">Grabaciones representativas</div>
       <div id="p-recs-list"></div>
     </div>
     <div class="panel-section" id="p-albums-section" style="display:none">
@@ -726,7 +865,7 @@ body::before{{content:"";position:fixed;inset:0;
   </div>
 </div>
 
-<div id="hint">Arrastra para mover · Rueda para zoom · Clic en nodo para explorar · + para info</div>
+<div id="hint">Arrastra · Rueda para zoom · Clic en nodo · + para info · Clic en fondo para deseleccionar</div>
 <div id="zoom-btns">
   <button class="z-btn" id="zin">+</button>
   <button class="z-btn" id="zout">−</button>
@@ -737,27 +876,15 @@ body::before{{content:"";position:fixed;inset:0;
 // ── DATA ──────────────────────────────────────────────────────────────────
 const GENRES = {genres_json};
 
-// ── color by category (stable hue from string hash) ──────────────────────
+// ── category color ────────────────────────────────────────────────────────
+const CAT_COLORS = {{
+  classical:"#1a237e", jazz:"#7a3e00", rnb:"#5c0032",
+  hiphop:"#2a0060", rock:"#6b0000", edm:"#00205b", experimental:"#3e0060",
+}};
 function catColor(cat) {{
-  const PALETTE = {{
-    "PREHISTORIC":"#5a3e28","ANCIENT":"#6b4226",
-    "SUB-SAHARAN":"#1b4332","NORTH AFRICAN":"#2d6a4f","WEST AFRICAN":"#386641",
-    "EAST AFRICAN":"#4a7c59","CENTRAL AFR":"#1b4332","SOUTHERN":"#2d5016",
-    "OCEANIAN":"#005f73","SOUTHEAST AS":"#0a9396","EAST ASIAN":"#0e6b75",
-    "CENTRAL ASIAN":"#006064","SOUTH ASIAN":"#0277bd",
-    "MIDDLE EAST":"#7b2d00","LATIN AM":"#6d2b3d","NORTH AM":"#4a1060",
-    "EUROPEAN":"#1a3a6b","JAZZ":"#7a3e00","BLUES":"#3e1f00",
-    "COUNTRY":"#5c4a00","FOLK":"#2e4a1e","POP":"#5c0032","ROCK":"#6b0000",
-    "ELECTRONIC":"#00205b","HIP HOP":"#2a0060","R&B":"#5c0032",
-    "CLASSICAL":"#1a237e","EXPERIMENTAL":"#3e0060","EDM":"#00205b",
-  }};
-  const upper = cat.toUpperCase();
-  for (const [k, v] of Object.entries(PALETTE)) {{
-    if (upper.includes(k)) return v;
-  }}
-  // hash fallback
+  if (CAT_COLORS[cat]) return CAT_COLORS[cat];
   let h = 0;
-  for (let i = 0; i < cat.length; i++) {{ h = (h * 31 + cat.charCodeAt(i)) & 0xffffffff; }}
+  for (let i = 0; i < cat.length; i++) h = (h * 31 + cat.charCodeAt(i)) & 0xffffffff;
   return `hsl(${{Math.abs(h) % 360}},35%,20%)`;
 }}
 
@@ -774,27 +901,26 @@ function ytId(url) {{
   return null;
 }}
 
-// ── render ────────────────────────────────────────────────────────────────
+// ── render setup ──────────────────────────────────────────────────────────
 const graph = document.getElementById("graph");
 const svgEl = document.getElementById("canvas-layer");
-let tx = 0, ty = 0, scale = 0.12;
+let tx = 0, ty = 0, scale = 0.15;
 
-// Lookup by 4-digit num string
 const byNum = {{}};
 GENRES.forEach(g => {{ byNum[g.num] = g; }});
 
 // ── edges ─────────────────────────────────────────────────────────────────
 const edgeEls = {{}};
+const NW = {nw}, NH = {nh};
 
 function nodeAnchors(g) {{
-  const nw = {nw}, nh = 100;
-  const cx = g.x + nw/2, cy = g.y + nh/2;
+  const cx = g.x + NW/2, cy = g.y + NH/2;
   return {{
     x: cx, y: cy,
-    top:   {{x: cx,       y: g.y}},
-    bot:   {{x: cx,       y: g.y + nh}},
-    left:  {{x: g.x,      y: cy}},
-    right: {{x: g.x + nw, y: cy}},
+    top:   {{x: cx,      y: g.y}},
+    bot:   {{x: cx,      y: g.y + NH}},
+    left:  {{x: g.x,     y: cy}},
+    right: {{x: g.x + NW, y: cy}},
   }};
 }}
 function bestAnchors(a, b) {{
@@ -816,7 +942,7 @@ GENRES.forEach(g => {{
     if (edgeEls[key]) return;
     const path = document.createElementNS("http://www.w3.org/2000/svg","path");
     path.setAttribute("fill","none");
-    path.setAttribute("stroke","rgba(255,255,255,0.25)");
+    path.setAttribute("stroke","rgba(255,255,255,0.22)");
     path.setAttribute("stroke-width","1.5");
     path.setAttribute("marker-end","url(#arr-dim)");
     path.dataset.from = g.num;
@@ -826,7 +952,7 @@ GENRES.forEach(g => {{
   }});
 }});
 
-let activeNum = null;   // 4-digit num of active genre
+let activeNum = null;
 
 function drawEdges() {{
   svgEl.setAttribute("viewBox", `0 0 ${{window.innerWidth}} ${{window.innerHeight}}`);
@@ -837,19 +963,19 @@ function drawEdges() {{
     const [ap, bp] = bestAnchors(nodeAnchors(from), nodeAnchors(to));
     path.setAttribute("d", curvePath(ws(ap), ws(bp)));
 
-    const isOut = activeNum && path.dataset.from === activeNum;
-    const isIn  = activeNum && path.dataset.to   === activeNum;
     if (activeNum) {{
+      const isOut = path.dataset.from === activeNum;
+      const isIn  = path.dataset.to   === activeNum;
       if (isOut) {{
         path.setAttribute("stroke","rgba(200,169,110,.65)");
-        path.setAttribute("stroke-width","1.5");
+        path.setAttribute("stroke-width","1.8");
         path.setAttribute("marker-end","url(#arr-gold)");
       }} else if (isIn) {{
         path.setAttribute("stroke","rgba(126,184,200,.55)");
-        path.setAttribute("stroke-width","1.5");
+        path.setAttribute("stroke-width","1.8");
         path.setAttribute("marker-end","url(#arr-blue)");
       }} else {{
-        path.setAttribute("stroke","rgba(255,255,255,.04)");
+        path.setAttribute("stroke","rgba(255,255,255,.03)");
         path.setAttribute("stroke-width","0.8");
         path.setAttribute("marker-end","url(#arr-dim)");
       }}
@@ -867,27 +993,67 @@ function applyTransform(anim = false) {{
   drawEdges();
 }}
 
-// ── category labels ───────────────────────────────────────────────────────
+// ── subgraph boxes + diagram/subgraph labels ──────────────────────────────
 (function() {{
-  const catBounds = {{}};
+  const PAD = 16, LBL = 22;
+
+  // Compute subgraph bounding boxes
+  const famBounds = {{}};
   GENRES.forEach(g => {{
-    if (!g.cat) return;
-    if (!catBounds[g.cat]) catBounds[g.cat] = {{minX:1e9, minY:1e9, maxX:-1}};
-    const b = catBounds[g.cat];
+    if (!g.fam) return;
+    const key = g.cat + "\x00" + g.fam;
+    if (!famBounds[key])
+      famBounds[key] = {{fam: g.fam, cat: g.cat,
+        minX:1e9, minY:1e9, maxX:-1e9, maxY:-1e9}};
+    const b = famBounds[key];
     b.minX = Math.min(b.minX, g.x);
     b.minY = Math.min(b.minY, g.y);
-    b.maxX = Math.max(b.maxX, g.x + {nw});
+    b.maxX = Math.max(b.maxX, g.x + NW);
+    b.maxY = Math.max(b.maxY, g.y + NH);
   }});
-  for (const [cat, b] of Object.entries(catBounds)) {{
+
+  // Render boxes first (so nodes appear on top)
+  for (const [, b] of Object.entries(famBounds)) {{
+    const box = document.createElement("div");
+    box.style.cssText =
+      `position:absolute;` +
+      `left:${{b.minX - PAD}}px;top:${{b.minY - LBL - PAD}}px;` +
+      `width:${{b.maxX - b.minX + PAD*2}}px;` +
+      `height:${{b.maxY - b.minY + LBL + PAD*2}}px;` +
+      `border:1px solid rgba(255,255,255,0.07);border-radius:4px;` +
+      `background:rgba(255,255,255,0.018);pointer-events:none`;
+    graph.appendChild(box);
+
+    const lbl = document.createElement("div");
+    lbl.style.cssText =
+      `position:absolute;` +
+      `left:${{b.minX - PAD + 7}}px;top:${{b.minY - LBL - PAD + 6}}px;` +
+      `color:rgba(255,255,255,.22);font-size:8px;font-family:var(--font-mono);` +
+      `letter-spacing:.13em;text-transform:uppercase;pointer-events:none`;
+    lbl.textContent = b.fam;
+    graph.appendChild(lbl);
+  }}
+
+  // Diagram name labels (above everything)
+  const diagBounds = {{}};
+  GENRES.forEach(g => {{
+    if (!diagBounds[g.cat]) diagBounds[g.cat] = {{minX:1e9, minY:1e9}};
+    const b = diagBounds[g.cat];
+    b.minX = Math.min(b.minX, g.x);
+    b.minY = Math.min(b.minY, g.y);
+  }});
+  for (const [cat, b] of Object.entries(diagBounds)) {{
     const el = document.createElement("div");
-    el.style.cssText = `position:absolute;left:${{b.minX}}px;top:${{b.minY - 22}}px;` +
-      `color:rgba(255,255,255,.25);font-size:9px;font-family:var(--font-mono);` +
-      `letter-spacing:.14em;text-transform:uppercase;white-space:nowrap;pointer-events:none`;
-    el.textContent = cat || "OTHER";
+    el.style.cssText =
+      `position:absolute;left:${{b.minX - PAD}}px;top:${{b.minY - LBL - PAD - 28}}px;` +
+      `color:rgba(255,255,255,.45);font-size:12px;font-family:var(--font-mono);` +
+      `letter-spacing:.2em;text-transform:uppercase;font-weight:700;pointer-events:none`;
+    el.textContent = cat;
     graph.appendChild(el);
   }}
 }})();
 
+// ── node elements ─────────────────────────────────────────────────────────
 const nodeEls = {{}};
 
 GENRES.forEach(g => {{
@@ -898,17 +1064,12 @@ GENRES.forEach(g => {{
   div.style.top  = g.y + "px";
   div.style.borderTopColor = catColor(g.cat);
 
-  div.innerHTML = `
-    <button class="node-plus" title="Info">+</button>
-    <div class="node-header">
-      <div>
-        <div class="node-genre">${{g.genre}}</div>
-        <div class="node-family">${{g.fam || g.cat}}</div>
-      </div>
-    </div>
-    <div class="node-body">
-      <div class="node-year">${{g.start_year ? "desde " + g.start_year : ""}}</div>
-    </div>`;
+  const yrTxt = g.year_str || (g.year ? String(g.year) : "");
+  const yr = yrTxt ? `<span class="yr">${{yrTxt}}</span>` : "";
+  div.innerHTML =
+    `<button class="node-plus" title="Info">+</button>` +
+    `<div class="node-title">${{yr}}${{g.genre}}</div>` +
+    `<div class="node-sub">${{g.fam || g.cat}}</div>`;
 
   div.querySelector(".node-plus").addEventListener("click", e => {{
     e.stopPropagation();
@@ -941,34 +1102,39 @@ function loadYt(vidId, btn) {{
 }}
 
 function openPanel(g) {{
-  setText("panel-num",   g.num);
+  setText("panel-year",  g.year ? String(g.year) : "");
   setText("panel-genre", g.genre);
   document.getElementById("panel-cat").textContent =
     [g.cat, g.fam].filter(Boolean).join(" › ");
 
-  // stop any running video
   document.getElementById("p-yt").src = "";
   show("p-yt-section", false);
   activeYtBtn = null;
 
-  // ── recordings list ────────────────────────────────────────────────────
+  // Recordings
   const recsList = document.getElementById("p-recs-list");
   recsList.innerHTML = "";
-  (g.recs || []).forEach(r => {{
-    const item = document.createElement("div");
-    item.className = "panel-rec-item";
-    const vid = ytId(r.yt);
-    item.innerHTML = `<div class="panel-rec-text">${{r.rec}}</div>` +
-      (vid ? `<button class="panel-rec-yt" data-vid="${{vid}}">▶ YouTube</button>` : "");
-    if (vid) {{
-      item.querySelector(".panel-rec-yt").addEventListener("click", function() {{
-        loadYt(this.dataset.vid, this);
-      }});
-    }}
-    recsList.appendChild(item);
-  }});
+  const recs = (g.recs || []).filter(r => r.rec && r.rec !== g.genre);
+  if (recs.length) {{
+    recs.forEach(r => {{
+      const item = document.createElement("div");
+      item.className = "panel-rec-item";
+      const vid = ytId(r.yt);
+      item.innerHTML = `<div class="panel-rec-text">${{r.rec}}</div>` +
+        (vid ? `<button class="panel-rec-yt" data-vid="${{vid}}">▶ YouTube</button>` : "");
+      if (vid) {{
+        item.querySelector(".panel-rec-yt").addEventListener("click", function() {{
+          loadYt(this.dataset.vid, this);
+        }});
+      }}
+      recsList.appendChild(item);
+    }});
+    show("p-recs-section", true);
+  }} else {{
+    show("p-recs-section", false);
+  }}
 
-  // ── albums list (from DB) ──────────────────────────────────────────────
+  // Albums from DB
   const albList = document.getElementById("p-albums-list");
   albList.innerHTML = "";
   const albs = g.alb_list || [];
@@ -1002,11 +1168,11 @@ function openPanel(g) {{
           <div class="panel-alb-artist">${{a.artist_name || ""}}</div>
           <div class="panel-alb-meta">${{[a.year, a.country].filter(Boolean).join(" · ")}}</div>
           ${{scores.length ? `<div class="panel-alb-meta">${{scores.map(([v,l])=>l+": "+v).join(" · ")}}</div>` : ""}}
-          <div class="panel-links" style="margin-top:5px">
+          <div class="panel-links">
             ${{linkDefs.map(([u,l])=>`<a class="panel-link" href="${{u}}" target="_blank" rel="noopener">${{l}}</a>`).join("")}}
             ${{vid ? `<button class="panel-rec-yt" data-vid="${{vid}}">▶ YouTube</button>` : ""}}
           </div>
-          ${{(a.desc_album||a.desc_artist) ? `<div class="panel-desc" style="margin-top:6px">${{a.desc_album||a.desc_artist}}</div>` : ""}}
+          ${{(a.desc_album||a.desc_artist) ? `<div class="panel-desc">${{a.desc_album||a.desc_artist}}</div>` : ""}}
         </div>`;
       if (vid) {{
         card.querySelector(".panel-rec-yt").addEventListener("click", function() {{
@@ -1025,10 +1191,10 @@ function openPanel(g) {{
 
 document.getElementById("panel-close").addEventListener("click", () => {{
   panel.classList.remove("open");
-  document.getElementById("p-yt").src = ""; // stop video
+  document.getElementById("p-yt").src = "";
 }});
 
-// ── node activation (dimming + edge highlight) ────────────────────────────
+// ── node activation ───────────────────────────────────────────────────────
 function deactivate() {{
   activeNum = null;
   Object.values(nodeEls).forEach(el => el.classList.remove("active","dimmed"));
@@ -1038,14 +1204,12 @@ function deactivate() {{
 function activateNode(id) {{
   const g = GENRES.find(g => g.id === id);
   if (!g) return;
-  // Switch directly to new node (even if another was active)
   activeNum = g.num;
   const relNums = new Set([
     g.num,
     ...(g.rel_out || []),
     ...GENRES.filter(gg => (gg.rel_out||[]).includes(g.num)).map(gg => gg.num),
   ]);
-
   Object.entries(nodeEls).forEach(([nid, el]) => {{
     const gg = GENRES.find(x => x.id == nid);
     el.classList.remove("active","dimmed");
@@ -1073,28 +1237,26 @@ document.addEventListener("mousemove", e => {{
   applyTransform();
 }});
 document.addEventListener("mouseup", e => {{
-  const wasDragging = dragging;
-  dragging = false;
+  const was = dragging; dragging = false;
   document.body.style.cursor = "default";
-  // Click on empty canvas (not a drag) → deactivate
-  if (wasDragging && !hasDragged && !e.target.closest(".node,#ui,#zoom-btns,#reset-btn,#info-panel")) {{
+  if (was && !hasDragged && !e.target.closest(".node,#ui,#zoom-btns,#reset-btn,#info-panel")) {{
     deactivate();
   }}
 }});
 
 document.addEventListener("wheel", e => {{
   e.preventDefault();
-  const f = e.deltaY < 0 ? 1.08 : 0.92;
+  const f  = e.deltaY < 0 ? 1.08 : 0.92;
   const ns = Math.max(0.05, Math.min(2.5, scale * f));
   tx = e.clientX - (e.clientX - tx) * (ns / scale);
   ty = e.clientY - (e.clientY - ty) * (ns / scale);
   scale = ns; applyTransform();
 }}, {{passive:false}});
 
-document.getElementById("zin").onclick  = () => {{ scale = Math.min(2.5, scale*1.15); applyTransform(true); }};
-document.getElementById("zout").onclick = () => {{ scale = Math.max(0.05, scale/1.15); applyTransform(true); }};
+document.getElementById("zin").onclick  = () => {{ scale = Math.min(2.5,scale*1.15); applyTransform(true); }};
+document.getElementById("zout").onclick = () => {{ scale = Math.max(0.05,scale/1.15); applyTransform(true); }};
 document.getElementById("reset-btn").onclick = () => {{
-  tx = 0; ty = 0; scale = 0.12;
+  tx = 0; ty = 0; scale = 0.15;
   deactivate();
   panel.classList.remove("open");
   document.getElementById("p-yt").src = "";
@@ -1107,20 +1269,18 @@ document.getElementById("search").addEventListener("input", e => {{
   const countEl = document.getElementById("count");
   if (!q) {{
     Object.values(nodeEls).forEach(el => el.classList.remove("dimmed"));
-    countEl.textContent = "";
-    activeNum = null;
-    drawEdges();
-    return;
+    countEl.textContent = ""; activeNum = null; drawEdges(); return;
   }}
   let hits = 0;
   GENRES.forEach(g => {{
-    const recsText = (g.recs||[]).map(r=>r.rec).join(" ").toLowerCase();
-    const albText  = (g.alb_list||[]).map(a=>(a.artist_name||"")+" "+(a.album_name||"")).join(" ").toLowerCase();
-    const match = g.genre.toLowerCase().includes(q)
-      || g.cat.toLowerCase().includes(q)
-      || (g.fam||"").toLowerCase().includes(q)
-      || recsText.includes(q)
-      || albText.includes(q);
+    const albText = (g.alb_list||[]).map(a =>
+      [(a.artist_name||""),(a.album_name||"")].join(" ")).join(" ").toLowerCase();
+    const match =
+      g.genre.toLowerCase().includes(q) ||
+      g.cat.toLowerCase().includes(q) ||
+      (g.fam||"").toLowerCase().includes(q) ||
+      (g.year ? String(g.year).includes(q) : false) ||
+      albText.includes(q);
     nodeEls[g.id].classList.toggle("dimmed", !match);
     if (match) hits++;
   }});
@@ -1131,7 +1291,8 @@ document.getElementById("search").addEventListener("input", e => {{
 let lastDist = 0;
 document.addEventListener("touchstart", e => {{
   if (e.touches.length === 1) {{
-    dragging = true; startX = e.touches[0].clientX; startY = e.touches[0].clientY;
+    dragging = true; hasDragged = false;
+    startX = e.touches[0].clientX; startY = e.touches[0].clientY;
     startTx = tx; startTy = ty;
   }} else if (e.touches.length === 2) {{
     lastDist = Math.hypot(e.touches[0].clientX-e.touches[1].clientX,
@@ -1143,6 +1304,8 @@ document.addEventListener("touchmove", e => {{
   if (e.touches.length === 1 && dragging) {{
     tx = startTx + (e.touches[0].clientX - startX);
     ty = startTy + (e.touches[0].clientY - startY);
+    if (Math.hypot(e.touches[0].clientX-startX, e.touches[0].clientY-startY) > 4)
+      hasDragged = true;
     applyTransform();
   }} else if (e.touches.length === 2) {{
     const d = Math.hypot(e.touches[0].clientX-e.touches[1].clientX,
@@ -1163,48 +1326,42 @@ applyTransform();
 
 def generate_html(genres: list[dict], relations: dict) -> str:
     js_data     = build_js_data(genres, relations)
-    genre_count = len(genres)
-    matched     = sum(1 for g in genres if g.get("alb"))
+    n           = len(genres)
     total_edges = sum(len(v) for v in relations.values())
-    subtitle    = f"{genre_count} géneros · {matched} con datos · {total_edges} conexiones"
+    diagrams    = sorted({g["cat"] for g in genres})
+    subtitle    = (f"musicgenretree.org · {n} géneros · {total_edges} conexiones · "
+                   f"{len(diagrams)} diagrama(s): {', '.join(diagrams)}")
     return HTML.format(
         nw=NODE_W,
-        count=subtitle,
+        nh=NODE_H,
+        subtitle=subtitle,
         genres_json=js_data,
     )
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    html_src  = fetch_chart()
-    genres    = parse_genres(html_src)
+    src_idx = next((i for i, a in enumerate(args) if a == "--source"), None)
+    SOURCE  = args[src_idx + 1] if src_idx is not None and src_idx + 1 < len(args) else "mermaid"
 
-    # ── filter to only the 7 target genre trees ──────────────────────────────
-    genres = [g for g in genres if g["cat"] in TARGET_CATS]
-    print(f"After filter: {len(genres)} genres")
+    if SOURCE == "ejemplo":
+        ej_path  = Path(next((a for a in args if a.endswith(".html")), "ejemplo.html"))
+        out_path = ej_path.with_stem(ej_path.stem + "_td")
+        genres, relations = parse_ejemplo(ej_path)
+        if not genres:
+            raise SystemExit("No genre data parsed from ejemplo.html")
+    else:
+        out_path = OUTPUT
+        print(f"Scanning {MERMAID_DIR}/…")
+        genres, relations = parse_mermaid_diagrams(MERMAID_DIR)
+        if not genres:
+            raise SystemExit("No genre data — add .md files to mermaid_diagrams/")
 
-    genres    = deduplicate_genres(genres)
-    relations = infer_relations(genres)
+    if not NO_DB and SOURCE != "ejemplo":
+        load_albums(DB_PATH)   # future: name-based matching
 
-    albums = {} if NO_DB else load_albums(DB_PATH)
-    genres = match(genres, albums)
-    genres = assign_positions(genres)
+    genres = assign_positions(genres, relations)
 
     out = generate_html(genres, relations)
-    OUTPUT.write_text(out, encoding="utf-8")
-    print(f"✓ Written {OUTPUT} ({len(out)//1024} KB, {len(genres)} nodes)")
-
-    # ── genre_yt.json — feed to yt-dlp ───────────────────────────────────
-    yt_data = [
-        {"num": g["number"], "genre": g["genre"], "cat": g["cat"],
-         "start_year": g.get("start_year"),
-         "recs": [{"num": r["num"], "rec": r["rec"], "yt": r["yt"], "year": r["year"]}
-                  for r in g.get("recs", []) if r.get("yt")]}
-        for g in genres
-        if any(r.get("yt") for r in g.get("recs", []))
-    ]
-    yt_json = Path("genre_yt.json")
-    yt_json.write_text(json.dumps(yt_data, ensure_ascii=False, indent=2), encoding="utf-8")
-    total_yt = sum(len(d["recs"]) for d in yt_data)
-    print(f"✓ Written {yt_json} ({len(yt_data)} genres, {total_yt} YouTube links)")
-    print(f"  Usage: jq -r '.[].recs[].yt' genre_yt.json | yt-dlp --batch-file -")
+    out_path.write_text(out, encoding="utf-8")
+    print(f"✓ Written {out_path} ({len(out)//1024} KB, {len(genres)} nodes)")
